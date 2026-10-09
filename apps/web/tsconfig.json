@@ -5,8 +5,12 @@
     "jsx": "react-jsx",
     "noEmit": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "virtual:pwa-register/react": [
+        "./node_modules/vite-plugin-pwa/react.d.ts"
+      ]
     }
   },
-  "include": ["src/**/*", "vite.config.ts"]
+  "include": ["src/**/*", "vite.config.ts"],
+  "exclude": ["src/sw.ts"]
 }

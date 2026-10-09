@@ -10,7 +10,14 @@
  * not fail fast, they hang until the server returns a 504. A survey must therefore
  * have a hard wall-clock and request ceiling, and degrade to a smaller survey or an
  * on-demand fetch rather than stalling the whole ingest.
+ *
+ * The runtime-agnostic helpers that were in this file -- `parseMonth` and
+ * `registrableDomain` -- now live in `@custom-wayback/pipeline` so the Worker ingest
+ * path can use them, and are re-exported below. Everything else here is CLI plumbing
+ * (`process.cwd()`, argv, usage text) and stays local on purpose.
  */
+
+import { parseMonth as parseMonthRange, registrableDomain } from '@custom-wayback/pipeline';
 
 export interface Budget {
   /** Hard cap on distinct page-loads (URL x day) ingested. */
@@ -67,7 +74,7 @@ export const DEFAULT_BUDGET: Budget = {
 export interface CrawlOptions {
   domain: string;
   month: string; // YYYY-MM
-  /** Page selection strategy, see ledger.ts. */
+  /** Page selection strategy, see selection.ts (packages/pipeline). */
   mode: 'perday' | 'anchor';
   outDir: string;
   dbPath: string;
@@ -157,8 +164,6 @@ function numArg(argv: string[], name: string, fallback: number): number {
   return parsed;
 }
 
-const TWO_LEVEL_TLDS = new Set(['co.uk', 'com.au', 'co.jp', 'com.br', 'co.kr', 'com.cn', 'co.in']);
-
 /**
  * Canonical form of the seed URL, guaranteed to be a usable absolute http(s) URL.
  * Falls back to `https://<domain>/` if the supplied seed cannot be parsed, so callers
@@ -176,28 +181,20 @@ export function canonicalSeed(seedUrl: string | undefined, domain: string): stri
   }
 }
 
-export function registrableDomain(host: string): string {
-  const parts = host.toLowerCase().replace(/\.$/, '').split('.');
-  if (parts.length <= 2) return parts.join('.');
-  const lastTwo = parts.slice(-2).join('.');
-  if (TWO_LEVEL_TLDS.has(lastTwo)) return parts.slice(-3).join('.');
-  return lastTwo;
-}
+// Re-exported from the pipeline package so './config.ts' stays a working import site.
+export { registrableDomain };
 
+/**
+ * `parseMonth` is the pipeline's, wrapped only so an invalid month still throws this
+ * package's `UsageError`: cli.ts matches on that type to print usage and exit 2. The
+ * message text is the pipeline's, unchanged.
+ */
 export function parseMonth(month: string): { from: string; to: string; firstDay: string; lastDay: string } {
-  const m = /^(\d{4})-(\d{2})$/.exec(month);
-  if (!m) throw new UsageError(`--month must be YYYY-MM (got "${month}")`);
-  const year = Number(m[1]);
-  const mon = Number(m[2]);
-  if (mon < 1 || mon > 12) throw new UsageError(`--month has an invalid month: "${month}"`);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const lastDate = new Date(Date.UTC(year, mon, 0));
-  return {
-    from: `${year}${pad(mon)}01000000`,
-    to: `${year}${pad(mon)}${pad(lastDate.getUTCDate())}235959`,
-    firstDay: `${year}-${pad(mon)}-01`,
-    lastDay: `${year}-${pad(mon)}-${pad(lastDate.getUTCDate())}`,
-  };
+  try {
+    return parseMonthRange(month);
+  } catch (err) {
+    throw new UsageError(err instanceof Error ? err.message : String(err));
+  }
 }
 
 export function parseCrawlOptions(argv: string[], cwd = process.cwd()): CrawlOptions {

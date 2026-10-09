@@ -9,19 +9,30 @@
  */
 
 import { Hono } from "hono";
+import type { Context, Next } from "hono";
 import type { Env } from "../env.js";
 import { authenticateRequest } from "../lib/auth.js";
 
 export const manifestRouter = new Hono<{ Bindings: Env }>();
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
+//
+// Scoped to this router's own paths rather than `/*`. This router is mounted at
+// `/v1`, so a `/*` guard would also demand a token for anything else under `/v1`
+// registered after it — which silently 401'd `/v1/health` until it was noticed.
 
-manifestRouter.use("/*", async (c, next) => {
+manifestRouter.use("/sites", authGuard);
+manifestRouter.use("/manifest", authGuard);
+
+async function authGuard(
+  c: Context<{ Bindings: Env }>,
+  next: Next,
+): Promise<Response | void> {
   const userId = await authenticateRequest(c.req.raw, c.env);
   if (!userId) return c.json({ error: "Unauthorized" }, 401);
   c.set("userId" as never, userId);
   return next();
-});
+}
 
 // ── Sites list ─────────────────────────────────────────────────────────────────
 

@@ -13,14 +13,39 @@ import { RegisterSchema, LoginSchema } from "@custom-wayback/shared";
 import {
   hashPassword,
   verifyPassword,
+  dummyVerify,
+  needsRehash,
   issueJwt,
   authenticateRequest,
   hashIp,
 } from "../lib/auth.js";
 import { ulid } from "../lib/ulid.js";
+import { consumeRateLimit, ipBucket } from "../lib/ratelimit.js";
 import type { Env } from "../env.js";
 
 export const authRouter = new Hono<{ Bindings: Env }>();
+
+/**
+ * Throttle the auth surface by hashed IP.
+ *
+ * Registration and login are the only unauthenticated, CPU-expensive endpoints
+ * we have — Argon2id is deliberately slow, which makes them the natural place
+ * for someone to burn our CPU allotment. Keyed by IP hash so we never store a
+ * raw address (see `hashIp`).
+ */
+authRouter.use("/*", async (c, next) => {
+  if (c.req.method !== "POST") return next();
+  const ip = c.req.raw.headers.get("CF-Connecting-IP") ?? "unknown";
+  const limit = await consumeRateLimit(c.env, ipBucket(await hashIp(ip), "auth"), "auth");
+  if (!limit.allowed) {
+    return c.json(
+      { error: "rate_limited", message: `Too many attempts. Try again in ${limit.retryAfter}s.`, retryAfter: limit.retryAfter },
+      429,
+      { "Retry-After": String(limit.retryAfter) },
+    );
+  }
+  return next();
+});
 
 // ── Register ─────────────────────────────────────────────────────────────────
 
@@ -37,7 +62,6 @@ authRouter.post("/register", zValidator("json", RegisterSchema), async (c) => {
     await hashPassword(password);
     return c.json({ error: "Email already in use" }, 409);
   }
-
   const id = ulid();
   const passwordHash = await hashPassword(password);
   const now = Math.floor(Date.now() / 1000);
@@ -62,10 +86,11 @@ authRouter.post("/login", zValidator("json", LoginSchema), async (c) => {
     .bind(email.toLowerCase())
     .first<{ id: string; password_hash: string; disabled: number }>();
 
-  // Always run the hash to prevent user-enumeration timing attacks.
+  // Always do the same work, whether or not the account exists. A faster
+  // "no such user" is a user-enumeration oracle.
   const validPassword = user
     ? await verifyPassword(user.password_hash, password)
-    : await hashPassword(password).then(() => false);
+    : await dummyVerify(password).then(() => false);
 
   if (!user || !validPassword || user.disabled) {
     return c.json({ error: "Invalid credentials" }, 401);
@@ -95,6 +120,16 @@ authRouter.post("/login", zValidator("json", LoginSchema), async (c) => {
   )
     .bind(now, user.id)
     .run();
+
+  // Transparent password upgrade. If `PBKDF2_ITERATIONS` is ever raised, existing
+  // records keep working and are re-hashed here, one login at a time — which is
+  // what makes the cost a config change rather than a migration.
+  if (needsRehash(user.password_hash)) {
+    const upgraded = await hashPassword(password);
+    await c.env.DB.prepare("UPDATE users SET password_hash = ? WHERE id = ?")
+      .bind(upgraded, user.id)
+      .run();
+  }
 
   const token = await issueJwt(user.id, sessionId, c.env.JWT_SECRET);
   return c.json({ token });

@@ -105,10 +105,34 @@ export const RUNTIME_SCRIPT = String.raw`
   };
 
   // ---- 3. Tell the shell we are interactive ------------------------------
+  var flags = { deadLinks: 0, missingAssets: 0, stubbedScripts: 0 };
+  try {
+    var meta = document.querySelector('meta[name="cw-mirror"]');
+    if (meta) {
+      var parsed = JSON.parse(meta.getAttribute('content') || '{}');
+      if (parsed && parsed.flags) flags = parsed.flags;
+    }
+  } catch (e) { /* flags are decoration; never break the page over them */ }
+
+  // Surface unresolvable links the moment the page is interactive, so the shell can
+  // say "18 links here point at pages this mirror does not have" instead of letting
+  // the visitor discover it one dead click at a time.
+  var reportDeadLinks = function () {
+    var dead = document.querySelectorAll('a[data-cw-dead]');
+    if (dead.length === 0) return;
+    report('cw:dead-links', {
+      count: dead.length,
+      samples: Array.prototype.slice.call(dead, 0, 5).map(function (a) {
+        return a.getAttribute('data-cw-dead');
+      })
+    });
+  };
+
   var markReady = function () {
     if (window.__cwRuntime.ready) return;
     window.__cwRuntime.ready = true;
-    report('cw:ready', { title: document.title || '' });
+    report('cw:ready', { title: document.title || '', flags: flags });
+    reportDeadLinks();
   };
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     setTimeout(markReady, 0);
@@ -131,7 +155,18 @@ html { -webkit-text-size-adjust: 100%; }
 body.cw-rewritten { overflow-anchor: none; }
 .cw-stub { display: none !important; }
 img[data-cw-missing] { outline: 1px dashed rgba(127,127,127,.5); outline-offset: -1px; }
+/* A link we found but could not resolve. It stays clickable so the shell can explain
+   why, rather than looking like a broken page. */
+a.cw-dead-link { cursor: help; }
+a.cw-dead-link:not([data-cw-external]) { text-decoration: line-through;
+  text-decoration-color: rgba(242,85,90,.6); text-decoration-thickness: 1px; }
 `;
+
+export interface MirroredPageFlags {
+  deadLinks: number;
+  missingAssets: number;
+  stubbedScripts: number;
+}
 
 export const RUNTIME_STYLE_ID = 'cw-runtime-style';
 export const RUNTIME_SCRIPT_ID = 'cw-runtime-script';

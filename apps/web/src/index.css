@@ -1,5 +1,87 @@
 @import "tailwindcss";
 
+/* ── Tailwind v4 custom utilities ──────────────────────────────────────────── */
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* ── Radix UI animation helpers (used by Dialog/Popover) ───────────────────── */
+
+@keyframes cw-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes cw-fade-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes cw-zoom-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes cw-zoom-out {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.95); }
+}
+@keyframes cw-slide-in-from-bottom {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+@keyframes cw-slide-out-to-bottom {
+  from { transform: translateY(0); }
+  to   { transform: translateY(100%); }
+}
+
+/* Tailwind v4 @utility shorthand for the data-[state=…] animation classes */
+@utility animate-in {
+  animation-fill-mode: both;
+}
+@utility animate-out {
+  animation-fill-mode: both;
+}
+@utility fade-in-0 {
+  animation-name: cw-fade-in;
+  animation-duration: 150ms;
+}
+@utility fade-out-0 {
+  animation-name: cw-fade-out;
+  animation-duration: 150ms;
+}
+@utility zoom-in-95 {
+  animation-name: cw-zoom-in;
+  animation-duration: 150ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+@utility zoom-out-95 {
+  animation-name: cw-zoom-out;
+  animation-duration: 150ms;
+}
+@utility slide-in-from-bottom {
+  animation-name: cw-slide-in-from-bottom;
+  animation-duration: 200ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+@utility slide-out-to-bottom {
+  animation-name: cw-slide-out-to-bottom;
+  animation-duration: 200ms;
+  animation-timing-function: ease-in;
+}
+@utility duration-150 {
+  animation-duration: 150ms;
+}
+@utility duration-200 {
+  animation-duration: 200ms;
+}
+
+/* pb-safe: padding-bottom that includes the device safe-area */
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
 @layer base {
   :root {
     --background: 222.2 84% 4.9%;
@@ -24,7 +106,16 @@
 @layer base {
   * {
     box-sizing: border-box;
-    /* Kill 300ms tap delay everywhere. */
+  }
+
+  /* Kill 300ms tap delay on interactive controls without breaking native
+   * select pickers on iOS (which need touch-action: auto). */
+  button,
+  a,
+  [role="button"],
+  label,
+  input,
+  textarea {
     touch-action: manipulation;
   }
 
@@ -38,10 +129,19 @@
     min-height: -webkit-fill-available;
   }
 
-  /* Minimum touch target size (44×44 px) */
-  button,
-  a,
-  [role="button"] {
+  /* Minimum touch target size (44×44 px).
+   *
+   * Applied only to interactive controls that are NOT already constrained by
+   * an explicit size utility. We use a data attribute opt-out (`data-compact`)
+   * for controls that deliberately live inside tight layouts — e.g. the
+   * calendar day grid (h-10 = 40 px cells) and icon-only toolbar buttons
+   * that live inside a fixed-height header.
+   *
+   * The calendar and toolbar set their own touch-target sizes via padding.
+   */
+  button:not([data-compact]),
+  a:not([data-compact]),
+  [role="button"]:not([data-compact]) {
     min-height: 44px;
     min-width: 44px;
   }

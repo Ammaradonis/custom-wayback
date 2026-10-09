@@ -91,17 +91,26 @@ Consequences baked into the code:
 ### Graceful degradation
 
 If the survey returns nothing, the crawler asks the **Availability API** for the closest capture of
-the seed URL and produces a shallow but genuinely browsable mirror, marking the run `partial` and
-telling you exactly why. This has been observed working on two domains independently.
+the seed URL, then **bootstraps a crawl frontier from that page's own links**, resolving each one
+with a cheap per-URL, single-day CDX query (`--frontier-lookups`, default 60). This exists because a
+seed-only mirror has exactly one page and therefore *no navigation at all* — the failure mode that
+matters most for a browsing tool.
 
-The run report never hides this. You will see, for example:
+Assets get the same treatment: when there is no survey index, each asset URL is resolved with a
+per-URL lookup instead of being reported missing.
+
+The run is marked `partial` and the report states plainly what happened:
 
 ```
   ! the CDX survey was incomplete for this run
     reason: CDX html query failed: timed out after 30000 ms
-    fell back to the Availability API for the seed URL only (one page deep)
+    fell back to the Availability API for the seed URL (one page deep)
+    frontier bootstrapped from the seed page: 11 of 12 links had a capture on 2024-03-01, 1 did not
     re-run with --refresh later; a complete survey is cached and reused
 ```
+
+The survey phase shares **one** wall-clock budget across the HTML and asset queries, so
+`--cdx-deadline` is a real ceiling rather than a per-query allowance.
 
 ---
 
@@ -148,6 +157,7 @@ npm test
 | `--cdx-deadline=<ms>` | 90000 | Wall-clock ceiling for the survey phase. |
 | `--cdx-max-requests=<n>` | 12 | Survey request ceiling. |
 | `--cdx-limit=<n>` | 2000 | Row cap per CDX query. |
+| `--frontier-lookups=<n>` | 60 | Per-URL CDX lookups used to bootstrap a frontier when the domain survey fails. |
 | `--path-filter=<regex>` | none | Ingest only page URLs matching a regex. |
 | `--no-assets` | off | HTML only (no images/CSS/JS). |
 | `--refresh` | off | Ignore the cached survey and re-query CDX. |
@@ -173,7 +183,36 @@ Deep link straight into a page:
 
 ```
 http://127.0.0.1:8787/?domain=samsung.com&month=2024-03&day=2024-03-15
+http://127.0.0.1:8787/?domain=samsung.com&month=2024-03&route=/a/samsung.com/2024-03-15/phones/
 ```
+
+### Navigation
+
+- **Day scrubber** across the top: every day that has pages, with a page count per day. Tapping a
+  day jumps to the most likely entry point for that day (shallowest, then shortest URL), unless a
+  specific page is deep-linked.
+- **Back / forward / reload** walk snapshot history, not browser history, so you cannot accidentally
+  fall out of the mirror. `ArrowLeft` / `ArrowRight` / `r` do the same from the keyboard, but are
+  ignored while a text field inside the archived page has focus.
+- **Archived links are intercepted.** Clicking an in-mirror link pushes a new snapshot onto the
+  history stack and updates the toolbar; the URL bar always shows the *original* URL.
+- **`↗` opens the real capture** on web.archive.org when you need to compare against the original.
+- **Every page in the mirror is listed** in the report panel (`⋮`), which doubles as the navigation
+  fallback when an archived page's own links are mostly unavailable.
+- **Nothing dead-ends silently.** A link with no capture in range stays visible and styled, with its
+  anchor text intact, and clicking it explains why instead of doing nothing.
+
+### Progress
+
+- A slim indeterminate bar appears the moment a snapshot starts loading and completes to green on
+  the page's `cw:ready` message. It is held briefly on very fast loads so "instant" is still legible,
+  and it respects `prefers-reduced-motion`.
+- **`N links not in this mirror`** chip: how many links on the current page have no capture. The
+  tooltip lists the actual targets.
+- **`N blocked requests`** chip: how many requests the archived page made to endpoints that no longer
+  exist, which were silenced so the page could not hang waiting for them.
+- The report panel shows the full ingest accounting: pages, archive.org request count, throttle
+  count, wall clock, byte totals, dedupe savings, link resolution, and any failures.
 
 A page that was never ingested returns a designed 404 that says what *is* stored rather than a dead
 end. If the same URL exists on another day, the viewer redirects to the nearest one — the same
@@ -226,7 +265,7 @@ rewrite.
 ## Tests
 
 ```bash
-npm test        # 30 tests, offline, no archive.org requests
+npm test        # 33 tests, offline, no archive.org requests
 ```
 
 The suite covers the parts where the real logic lives, and never depends on archive.org being
@@ -240,9 +279,11 @@ reachable:
 - CSS `url()` / `@import` extraction and rewriting, including `data:` URIs being left alone
 - The full rewriter: assets, lazy images, `srcset`, scripts, inline styles, links, drift annotation,
   dead-link quarantine, CSP/robots injection, form neutralisation, plugin stripping, idempotency
+- Mirroring flags in the `cw-mirror` meta (dead-link, missing-asset and stubbed-script counts) that
+  drive the viewer's status chips
 - Viewer routing, including site roots in both `/a/domain/day` and `/a/domain/day/` forms
 
-Three defects found by this suite during development, all now regression-tested:
+Four defects found by this suite during development, all now regression-tested:
 
 1. `pathDepth('/about/team/')` returned 1 instead of 2 (trailing-slash special case).
 2. Same-day captures were silently dropped: the "within 60 seconds" filter compared `HHMMSS` as a
@@ -252,6 +293,10 @@ Three defects found by this suite during development, all now regression-tested:
    `/`, so the `/a/<domain>/<day>` form never matched. Alongside it, `node:sqlite` returns raw
    column names, so `row.r2Key` was `undefined` at runtime while TypeScript claimed it was a string —
    now mapped explicitly in one place.
+4. `blobStore.put()` skipped the write when the key already existed and reported `deduped: true`.
+   That is correct for content-addressed assets (the key *is* the hash) but wrong for page blobs: a
+   re-rewrite produced different bytes at the same key, so the new HTML was discarded while the
+   crawl reported success. Page and raw writes now pass `replace: true`.
 
 ---
 

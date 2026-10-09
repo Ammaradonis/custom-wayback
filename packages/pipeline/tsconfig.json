@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "$comment": [
+    "lib stays ES2022 on purpose: the platform globals this package may use (URL,",
+    "URLSearchParams, TextDecoder/TextEncoder) are declared explicitly in src/env.d.ts",
+    "instead of pulling in the DOM lib or @types/node, so TypeScript itself enforces",
+    "that the package stays runnable in both Node 22+ and Cloudflare Workers."
+  ]
+}

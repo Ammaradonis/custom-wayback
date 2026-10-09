@@ -8,11 +8,13 @@ export interface Env {
   // ── D1 ──────────────────────────────────────────────────────────────────
   DB: D1Database;
 
-  // ── R2 ──────────────────────────────────────────────────────────────────
+  // ── R2 ───────────────────────────────────────────────────────────────────
   STORAGE: R2Bucket;
 
   // ── Queues ───────────────────────────────────────────────────────────────
   INGEST_QUEUE: Queue;
+  /** Terminal queue for messages that exhausted their retries (plan.md §4). */
+  DLQ_QUEUE: Queue;
 
   // ── KV ───────────────────────────────────────────────────────────────────
   COVERAGE_KV: KVNamespace;
@@ -32,4 +34,10 @@ export interface Env {
   MAX_PAGES_PER_MONTH: string;
   SNAPSHOT_BEHAVIOR: "nearest" | "exact";
   PURGE_GRACE_SECONDS: string;
+  /** Crawls a user may start per UTC day. The cost guardrail. */
+  CRAWL_QUOTA_PER_DAY: string;
+  /** Monthly spend ceiling in USD; 0 disables the guardrail. */
+  MONTHLY_BUDGET_USD: string;
+  /** Optional: only allow registrations from these comma-separated emails. */
+  ALLOWED_EMAILS?: string;
 }

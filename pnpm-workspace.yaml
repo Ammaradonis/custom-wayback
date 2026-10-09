@@ -1,8 +1,9 @@
 packages:
   - "apps/*"
   - "packages/*"
-  # crawler-local is a standalone Phase 1 package with no workspace deps.
-  # Its data/ directory is git-ignored.
+  # crawler-local is the Phase 1 local runner (already matched by apps/*, listed
+  # explicitly because its data/ directory is git-ignored). It depends on
+  # packages/pipeline for the shared ingest logic.
   - "apps/crawler-local"
 
 # pnpm 10 does not run dependency lifecycle scripts unless they are allowlisted.

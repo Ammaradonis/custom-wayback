@@ -1,0 +1,19 @@
+{
+  "name": "@custom-wayback/pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Runtime-agnostic ingestion logic shared by the local Node crawler and the Cloudflare Workers queue consumer: URL canonicalisation, Wayback CDX specs and parsing, page selection, the injected mirror runtime, and month/domain helpers. Standard globals only (URL, URLSearchParams, TextDecoder/TextEncoder, Intl, Date) -- no Node builtins, no DOM, no filesystem, no process.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

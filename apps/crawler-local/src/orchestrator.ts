@@ -37,8 +37,8 @@ import {
 } from './wayback.ts';
 import { PoliteFetcher } from './politeness.ts';
 import type { RequestStats } from './politeness.ts';
-import { pickAssetCapture, resolveLink, selectPages } from './ledger.ts';
-import type { SelectedPage } from './ledger.ts';
+import { pickAssetCapture, resolveLink, selectPages } from '@custom-wayback/pipeline';
+import type { SelectedPage } from '@custom-wayback/pipeline';
 import { cssUrls, extractPage, rewriteCss, rewritePage } from './rewrite.ts';
 import type { AssetRequest, LinkResolutionInfo, RewriteContext } from './rewrite.ts';
 import { parseMonth } from './config.ts';
@@ -55,7 +55,7 @@ import {
   sameSite,
   snapshotPath,
   tsToDay,
-} from './urlutil.ts';
+} from '@custom-wayback/pipeline';
 import type { Logger } from './logger.ts';
 
 /** Raw HTML is kept in memory up to this size so pass 2 avoids a disk read. */
@@ -702,8 +702,10 @@ export class Crawler {
     }
 
     const rawKey = rawBlobKey(this.opts.domain, page.day, page.url);
-    const put = await this.blobs.put(rawKey, outcome.body);
-    if (!put.deduped) this.bytesStored += outcome.body.byteLength;
+    // Originals are immutable for a given capture, but a re-run may legitimately
+    // resolve the same route to a different capture, so replace rather than skip.
+    const rawPut = await this.blobs.put(rawKey, outcome.body, true);
+    if (!rawPut.deduped) this.bytesStored += outcome.body.byteLength;
 
     const record: PageRecord = {
       page,
@@ -801,6 +803,8 @@ export class Crawler {
     const key = assetBlobKey(hash);
     let record = this.assetIndex.get(hash);
     if (!record) {
+      // Insert-if-absent is exactly right here: the key IS the content hash, so an
+      // existing key means identical bytes and there is nothing to update.
       const put = await this.blobs.put(key, bytes);
       if (!put.deduped) this.bytesStored += bytes.byteLength;
       record = { hash, path: assetPath(hash), mime, bytes: bytes.byteLength };
@@ -886,7 +890,10 @@ export class Crawler {
       const body = new TextEncoder().encode(result.html);
 
       const blobKey = pageBlobKey(this.opts.domain, record.page.day, record.page.url);
-      const put = await this.blobs.put(blobKey, body);
+      // Replace: re-rewriting a page (new shim, tighter CSP, better link ledger) yields
+      // different bytes at the same key, and silently skipping the write would leave
+      // stale HTML on disk while reporting success.
+      const put = await this.blobs.put(blobKey, body, true);
       if (!put.deduped) this.bytesStored += body.byteLength;
 
       const urlHash = createHash('sha1').update(record.page.url).digest('hex').slice(0, 16);

@@ -7,18 +7,21 @@
     "dev": "wrangler dev",
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node scripts/run-api-tests.mjs",
     "deploy": "wrangler deploy",
     "lint": "eslint src --ext .ts"
   },
   "dependencies": {
+    "@custom-wayback/pipeline": "workspace:*",
     "@custom-wayback/shared": "workspace:*",
     "@hono/zod-validator": "0.4.2",
     "hono": "4.6.14",
-    "oslo": "1.2.1",
+    "linkedom": "0.18.5",
     "zod": "3.23.8"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "4.20241218.0",
+    "esbuild": "0.24.2",
     "wrangler": "3.95.0"
   }
 }

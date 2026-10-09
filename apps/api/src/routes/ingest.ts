@@ -1,18 +1,34 @@
 /**
  * Ingest job routes.
  *
- * POST /v1/jobs              — start a crawl job
- * GET  /v1/jobs/:ingestId    — job status (polling)
- * GET  /v1/jobs/:ingestId/events — SSE progress stream
- * DELETE /v1/jobs/:ingestId  — cancel a queued/in-progress job
- * GET  /v1/usage             — per-domain cost attribution
+ *  POST   /v1/jobs              — start a crawl job (quota + budget checked, then queued)
+ *  GET    /v1/jobs/:ingestId    — job status: checkpoint, stage, throttle state
+ *  GET    /v1/jobs/:ingestId/events — SSE progress stream
+ *  DELETE /v1/jobs/:ingestId    — cancel
+ *
+ *  GET    /v1/usage             — cost monitoring: modelled spend, budget, throttle
+ *  GET    /v1/usage/limits      — the limits currently in force, for the UI
+ *
+ * Throttling has three layers here and it is worth knowing which is which:
+ *   - `consumeRateLimit(..., "jobs")` stops a client hammering the start endpoint.
+ *   - `crawlQuota` caps how many crawls one user starts per UTC day.
+ *   - the budget guardrail refuses *any* new crawl once the month's modelled cost
+ *     has crossed `MONTHLY_BUDGET_USD`. That is the one that protects the bill.
  */
 
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
-import { StartIngestSchema, DEFAULT_BUDGET } from "@custom-wayback/shared";
+import {
+  DEFAULT_BUDGET,
+  DEFAULT_CRAWL_QUOTA_PER_DAY,
+  StartIngestSchema,
+  type IngestQueueMessage,
+  type ThrottleState,
+} from "@custom-wayback/shared";
 import { authenticateRequest } from "../lib/auth.js";
 import { ulid } from "../lib/ulid.js";
+import { consumeRateLimit, crawlQuota, userBucket } from "../lib/ratelimit.js";
+import { buildUsageReport, currentMonth, budgetUsdFromEnv } from "../lib/cost.js";
 import type { Env } from "../env.js";
 
 export const ingestRouter = new Hono<{ Bindings: Env }>();
@@ -26,11 +42,71 @@ ingestRouter.use("/*", async (c, next) => {
   return next();
 });
 
+/** Read throttling: generous, but not unlimited — every read is D1 rows read. */
+ingestRouter.use("/*", async (c, next) => {
+  if (c.req.method !== "GET") return next();
+  const userId = c.get("userId" as never) as string;
+  const limit = await consumeRateLimit(c.env, userBucket(userId, "read"), "read");
+  c.header("X-RateLimit-Limit", String(limit.limit));
+  c.header("X-RateLimit-Remaining", String(limit.remaining));
+  c.header("X-RateLimit-Reset", String(limit.resetAt));
+  if (!limit.allowed) {
+    return c.json(
+      { error: "Too many requests", retryAfter: limit.retryAfter },
+      429,
+      { "Retry-After": String(limit.retryAfter) },
+    );
+  }
+  return next();
+});
+
 // ── Start a job ───────────────────────────────────────────────────────────────
 
 ingestRouter.post("/", zValidator("json", StartIngestSchema), async (c) => {
   const userId = c.get("userId" as never) as string;
   const { domainId, month, budgetOverride } = c.req.valid("json");
+
+  // 1. Request throttle — the cheap, always-on layer.
+  const limit = await consumeRateLimit(c.env, userBucket(userId, "jobs"), "jobs");
+  if (!limit.allowed) {
+    return c.json(
+      {
+        error: "rate_limited",
+        message: `Too many crawl requests. Try again in ${limit.retryAfter}s.`,
+        retryAfter: limit.retryAfter,
+      },
+      429,
+      { "Retry-After": String(limit.retryAfter) },
+    );
+  }
+
+  // 2. Daily crawl quota — bounds how much work one account can ask for.
+  const quota = await crawlQuota(c.env, userId);
+  if (quota.remaining <= 0) {
+    return c.json(
+      {
+        error: "quota_exceeded",
+        message: `Daily crawl quota (${quota.limit}) reached. It resets at ${new Date(quota.resetsAt * 1000).toISOString()}.`,
+        quota,
+      },
+      429,
+    );
+  }
+
+  // 3. Budget guardrail — the layer that actually protects the invoice.
+  const report = await buildUsageReport(c.env, userId, currentMonth());
+  if (report.budget.crawlsBlocked) {
+    return c.json(
+      {
+        error: "budget_exceeded",
+        message:
+          `Monthly ingest budget reached: $${report.budget.spentUsd.toFixed(2)} of ` +
+          `$${report.budget.budgetUsd.toFixed(2)}. Raise MONTHLY_BUDGET_USD to continue.`,
+        budget: report.budget,
+      },
+      402,
+    );
+  }
 
   // Verify the user owns this domain.
   const domainRow = await c.env.DB.prepare(
@@ -56,39 +132,129 @@ ingestRouter.post("/", zValidator("json", StartIngestSchema), async (c) => {
   const id = ulid();
   const now = Math.floor(Date.now() / 1000);
   await c.env.DB.prepare(
-    `INSERT INTO ingests (id, domain_id, month, status, budget_json, started_at)
-     VALUES (?,?,?,?,?,?)`,
+    `INSERT INTO ingests (id, domain_id, month, status, stage, budget_json, started_at, cursor, asset_cursor, attempts)
+     VALUES (?,?,?,?,?,?,?,0,0,0)
+     ON CONFLICT(id) DO UPDATE SET status = 'queued', stage = 'survey', error_message = NULL`,
   )
-    .bind(id, domainId, month, "queued", JSON.stringify(budget), now)
+    .bind(id, domainId, month, "queued", "survey", JSON.stringify(budget), now)
     .run();
 
-  // Enqueue for the crawler.
-  await c.env.INGEST_QUEUE.send({
-    ingestId: id,
-    domain: domainRow.domain,
-    month,
-    budget,
-  });
+  // Enqueue the first bounded stage. Everything after this is the consumer's job.
+  const message: IngestQueueMessage = { ingestId: id, domain: domainRow.domain, month, stage: "survey", attempt: 0 };
+  await c.env.INGEST_QUEUE.send(message);
 
-  return c.json({ id, status: "queued" }, 202);
+  return c.json(
+    {
+      id,
+      status: "queued",
+      stage: "survey",
+      budget,
+      quota: { ...quota, remaining: Math.max(0, quota.remaining - 1) },
+      budgetStatus: report.budget,
+    },
+    202,
+  );
 });
 
-// ── Job status (polling) ──────────────────────────────────────────────────────
+// ── Cost monitoring ───────────────────────────────────────────────────────────
+// Registered before `/:ingestId` on purpose: Hono matches in registration order,
+// and "/usage" would otherwise be read as an ingest id.
+
+/** GET /v1/usage — the cost dashboard payload (plan.md §11.5 item 5). */
+ingestRouter.get("/usage", async (c) => {
+  const userId = c.get("userId" as never) as string;
+  const month = c.req.query("month") ?? currentMonth();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return c.json({ error: "month must be YYYY-MM" }, 400);
+  }
+  const report = await buildUsageReport(c.env, userId, month);
+  return c.json(report);
+});
+
+/** GET /v1/usage/limits — what is currently enforced, for the settings sheet. */
+ingestRouter.get("/usage/limits", async (c) => {
+  const userId = c.get("userId" as never) as string;
+  const quota = await crawlQuota(c.env, userId);
+  const read = await consumeRateLimit(c.env, userBucket(userId, "read"), "read");
+  return c.json({
+    crawlQuotaPerDay: quota.limit || DEFAULT_CRAWL_QUOTA_PER_DAY,
+    crawlQuotaRemaining: quota.remaining,
+    crawlQuotaResetsAt: quota.resetsAt,
+    monthlyBudgetUsd: budgetUsdFromEnv(c.env),
+    readLimitPerMinute: read.limit,
+  });
+});
+
+// ── Job status ────────────────────────────────────────────────────────────────
+
+interface JobRow {
+  id: string;
+  status: string;
+  stage: string | null;
+  month: string;
+  pages_total: number;
+  pages_done: number;
+  assets_total: number;
+  assets_done: number;
+  bytes_stored: number;
+  ia_429_count: number;
+  consecutive_429: number;
+  breaker_open_until: number | null;
+  last_throttle_at: number | null;
+  attempts: number;
+  degraded_reason: string | null;
+  error_message: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+}
 
 ingestRouter.get("/:ingestId", async (c) => {
   const userId = c.get("userId" as never) as string;
   const { ingestId } = c.req.param();
 
   const row = await c.env.DB.prepare(
-    `SELECT i.*, d.user_id FROM ingests i
+    `SELECT i.id, i.status, i.stage, i.month, i.pages_total, i.pages_done,
+            i.assets_total, i.assets_done, i.bytes_stored, i.ia_429_count,
+            i.consecutive_429, i.breaker_open_until, i.last_throttle_at,
+            i.attempts, i.degraded_reason, i.error_message, i.started_at, i.finished_at
+     FROM ingests i
      JOIN domains d ON d.id = i.domain_id
      WHERE i.id = ? AND d.user_id = ?`,
   )
     .bind(ingestId, userId)
-    .first();
+    .first<JobRow>();
   if (!row) return c.json({ error: "Not found" }, 404);
-  return c.json(row);
+
+  return c.json({ ...row, throttle: throttleStateOf(row) });
 });
+
+/** Human-readable throttle state — the UI shows this instead of a silent hang (§12.3). */
+export function throttleStateOf(row: {
+  status: string;
+  consecutive_429: number;
+  breaker_open_until: number | null;
+}): ThrottleState {
+  const now = Math.floor(Date.now() / 1000);
+  const parked = row.breaker_open_until !== null && row.breaker_open_until > now;
+  if (parked) {
+    const remaining = (row.breaker_open_until as number) - now;
+    return {
+      active: true,
+      resumeAt: row.breaker_open_until,
+      consecutive: row.consecutive_429,
+      message: `archive.org is throttling us — circuit breaker open, resuming in ${remaining}s`,
+    };
+  }
+  if (row.consecutive_429 > 0) {
+    return {
+      active: false,
+      resumeAt: null,
+      consecutive: row.consecutive_429,
+      message: `${row.consecutive_429} throttle response(s) so far; backing off between requests`,
+    };
+  }
+  return { active: false, resumeAt: null, consecutive: 0, message: null };
+}
 
 // ── SSE progress stream ───────────────────────────────────────────────────────
 
@@ -96,52 +262,55 @@ ingestRouter.get("/:ingestId/events", async (c) => {
   const userId = c.get("userId" as never) as string;
   const { ingestId } = c.req.param();
 
-  // Verify ownership.
-  const row = await c.env.DB.prepare(
+  const owned = await c.env.DB.prepare(
     `SELECT i.status FROM ingests i
      JOIN domains d ON d.id = i.domain_id
      WHERE i.id = ? AND d.user_id = ?`,
   )
     .bind(ingestId, userId)
     .first<{ status: string }>();
-  if (!row) return c.json({ error: "Not found" }, 404);
+  if (!owned) return c.json({ error: "Not found" }, 404);
 
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
 
   const send = (data: unknown) => {
-    writer
-      .write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
-      .catch(() => void 0);
+    writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)).catch(() => void 0);
   };
 
-  // Poll D1 every 2 s and emit events.
+  send({ type: "open", ingestId });
+
+  // Poll D1 every 2 s and emit a progress frame. Deliberately not a Durable
+  // Object: a crawl finishes in seconds-to-minutes, and an SSE stream that
+  // survives the worker is a service to maintain for no benefit here.
   let done = false;
   const interval = setInterval(async () => {
     if (done) return;
     const current = await c.env.DB.prepare(
-      `SELECT status, pages_total, pages_done, assets_total, assets_done,
-              bytes_stored, ia_429_count, error_message
+      `SELECT status, stage, pages_total, pages_done, assets_total, assets_done,
+              bytes_stored, ia_429_count, consecutive_429, breaker_open_until,
+              attempts, degraded_reason, error_message
        FROM ingests WHERE id = ?`,
     )
       .bind(ingestId)
-      .first<{
-        status: string;
-        pages_total: number;
-        pages_done: number;
-        assets_total: number;
-        assets_done: number;
-        bytes_stored: number;
-        ia_429_count: number;
-        error_message: string | null;
-      }>();
+      .first<JobRow & { stage: string | null }>();
     if (!current) return;
 
     send({
       type: "progress",
       ingestId,
-      ...current,
+      status: current.status,
+      stage: current.stage,
+      pagesTotal: current.pages_total,
+      pagesDone: current.pages_done,
+      assetsTotal: current.assets_total,
+      assetsDone: current.assets_done,
+      bytesStored: current.bytes_stored,
+      ia429Count: current.ia_429_count,
+      attempts: current.attempts,
+      degradedReason: current.degraded_reason,
+      throttle: throttleStateOf(current),
     });
 
     if (["ready", "partial", "failed"].includes(current.status)) {
@@ -157,6 +326,8 @@ ingestRouter.get("/:ingestId/events", async (c) => {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
+      // Disable proxy buffering so the first frame lands immediately.
+      "X-Accel-Buffering": "no",
     },
   });
 });
@@ -176,30 +347,15 @@ ingestRouter.delete("/:ingestId", async (c) => {
     .first();
   if (!row) return c.json({ error: "Not found or not cancellable" }, 404);
 
-  await c.env.DB.prepare("UPDATE ingests SET status = 'failed', error_message = 'Cancelled by user' WHERE id = ?")
-    .bind(ingestId)
+  // Cancellation is a status change, not a queue purge: the consumer checks the
+  // status before doing work and drops the message. Purging the queue would also
+  // drop unrelated jobs, since one queue carries every domain's stages.
+  await c.env.DB.prepare(
+    `UPDATE ingests SET status = 'failed', stage = 'done', lease_until = NULL,
+       breaker_open_until = NULL, error_message = 'Cancelled by user', finished_at = ?
+     WHERE id = ?`,
+  )
+    .bind(Math.floor(Date.now() / 1000), ingestId)
     .run();
   return c.json({ ok: true });
-});
-
-// ── Usage dashboard ───────────────────────────────────────────────────────────
-
-ingestRouter.get("/usage", async (c) => {
-  const userId = c.get("userId" as never) as string;
-  // Aggregate by domain + kind for the current calendar month.
-  const now = new Date();
-  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-
-  const rows = await c.env.DB.prepare(
-    `SELECT u.domain, u.kind, SUM(u.value) as total
-     FROM usage_ledger u
-     JOIN domains d ON d.domain = u.domain AND d.user_id = ?
-     WHERE u.month = ?
-     GROUP BY u.domain, u.kind
-     ORDER BY u.domain, u.kind`,
-  )
-    .bind(userId, month)
-    .all();
-
-  return c.json({ month, usage: rows.results });
 });

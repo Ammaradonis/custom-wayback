@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "WebWorker"],
+    "noEmit": true,
+    // exactOptionalPropertyTypes causes false positives against workbox's
+    // type definitions (ExpirationPlugin has optional plugin callback props).
+    // Relax it for the service worker only; it is still enforced for all app code.
+    "exactOptionalPropertyTypes": false,
+    "paths": {}
+  },
+  "include": ["src/sw.ts"]
+}

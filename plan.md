@@ -336,7 +336,8 @@ The crawler is a stateless Node process, so this is a deployment choice, not a r
 |---|---|---|---|
 | **A. Cloudflare Containers** | `wrangler` container binding, `sleepAfter` for scale-to-zero | Included in the $5/mo Workers Paid plan: 25 GiB-hours + 375 vCPU-minutes/month, then $0.0000025/GiB-s and $0.00002/vCPU-s | You want one deploy target and no servers |
 | **B. Tiny VPS** (Hetzner CX22-class / Fly.io `shared-cpu-1x·512MB @ $4.39/mo`) | Docker image, cron/queue consumer | Hetzner: single-digit €/mo with ~20 TB egress included; Fly.io: $4.39/mo compute + $0.15/GB-mo volume | You crawl a lot and want flat, predictable cost |
-| **C. Your own PC** (`node apps/crawler`) | `pnpm crawl --domain=samsung.com --month=2024-03` | $0 (electricity) | **Best starting point.** Personal tool, bursty work, and your PC is already the machine you research on |
+| **C. Your own PC** (`node apps/crawler-local`) | `pnpm crawl --domain=samsung.com --month=2024-03` | $0 (electricity) | **Best starting point.** Personal tool, bursty work, and your PC is already the machine you research on |
+| **D. In the Worker, as a queue consumer** ← *what Phase 4 shipped* | `[[queues.consumers]]` in `wrangler.toml`, no container, no server | $0 beyond the $5 plan | Work fits in bounded batches and you would rather configure politeness than operate a box |
 
 **Recommendation: start with C, plan for A.** The local runner validates the CDX/`id_`/rewrite
 pipeline against real archive.org responses before any cloud money is spent, and it works
@@ -705,7 +706,7 @@ incident.
 Each phase ships something demonstrable and is gated on the acceptance criteria in §9.3 and below.
 
 ### Phase 0 — Foundations (0.5–1 day)
-Repo skeleton (`apps/web`, `apps/api`, `apps/crawler`, `packages/shared`), TypeScript project
+Repo skeleton (`apps/web`, `apps/api`, `apps/crawler-local`, `packages/shared`, `packages/pipeline`), TypeScript project
 references, Tailwind v4 + shadcn/ui, `wrangler` config, D1 schema + Drizzle migrations, secret
 rotation from §13, `.gitignore` + gitleaks, CI running typecheck/lint/test on push.
 **Done when:** `wrangler dev` serves a hello-world shell and `wrangler d1 migrations apply` runs
@@ -740,6 +741,36 @@ billing alerts, `/v1/usage` dashboard, cron-based refresh for tracked domains.
 **Done when:** a crawl survives an induced archive.org 429 storm, resumes, and completes; usage
 dashboard matches the invoice line items.
 
+> **Status (implemented, verified locally; not yet deployed).**
+> The crawler did **not** move to a Container: the queue consumer runs *in the Worker* instead.
+> A Worker cannot serialize requests per host in-process the way the local runner does, so
+> politeness moved from code to configuration — `max_concurrency` × `max_batch_size` ×
+> `DEFAULT_FETCH_BUDGET` bound the archive.org request rate at or under ~1 rps (§12 rule 3), and
+> the circuit breaker is durable state in D1 rather than a closure. That is a real trade: less
+> precise spacing, no container to run, and no always-on box to pay for.
+>
+> What exists now:
+> - `apps/api/src/queue/` — stage machine (`survey → pages → assets → finalize`), one bounded
+>   queue message per stage-batch, cursor checkpointing in `ingests`, per-stage lease, per-stage
+>   delivery ceiling, DLQ handler that records rather than drops.
+> - `packages/shared/src/policy.ts` — backoff + breaker rules, one implementation shared by the
+>   local runner and the cloud consumer, with injected jitter and clock so it is tested exactly.
+> - `apps/api/src/lib/ratelimit.ts` — fixed-window throttling in D1 (no extra service): start
+>   endpoint, read endpoints, auth by hashed IP, plus a per-day crawl quota.
+> - `apps/api/src/lib/cost.ts` + `GET /v1/jobs/usage` — modelled spend from real recorded usage,
+>   per kind and per domain, with a hard `MONTHLY_BUDGET_USD` guardrail that returns 402.
+> - `throttle_events` telemetry + `throttle.message` on the job and SSE stream, so throttling is
+>   never a silent hang.
+> - `scripts/phase4-smoke.ps1`, `apps/api/test/queue.test.ts` (stage machine end to end against a
+>   fake D1/R2/Queues), and [docs/phase-4-deployment.md](docs/phase-4-deployment.md) for the
+>   account-level steps (Access, billing alerts, hard spend cap, R2 lifecycle rules).
+>
+> Still outstanding, and only you can do it: the §13 credential rotation, the remote D1 migration,
+> the deploy, and the account-level steps in the runbook §6. The induced-429 acceptance test is
+> written up in runbook §9 and is deliberately **not** run automatically — it requires temporarily
+> degrading a preview deployment.
+
+
 ### Phase 5 — Polish (ongoing)
 Cross-domain search inside crawled snapshots (D1 FTS5), "compare two months" view for the
 marketing-research use case, share links, export a snapshot as a static bundle (see §15), PDF/
@@ -755,7 +786,7 @@ screenshot capture, and passkey-based multi-user if it ever leaves your pocket.
 | **"Download for offline" per month** | True offline browsing in the field | Same; works with iOS's 7-day limit by re-fetching on demand |
 | **Full-text search across snapshots** | Huge for marketing research ("when did they change the price page?") | D1 FTS5, ~$0.75/GB-mo |
 | **Diff two months** | Visual change detection on a competitor's site | CPU-only; no new services |
-| **Local-first desktop mode** (`node apps/crawler` + local viewer) | Zero cloud cost, fully private research corpus | $0 |
+| **Local-first desktop mode** (`node apps/crawler-local` + local viewer) | Zero cloud cost, fully private research corpus | $0 |
 | **Save Page Now integration** | Archive a live page you're looking at, then read it here fast | SPN has its own access policy — evaluate before building |
 
 ---

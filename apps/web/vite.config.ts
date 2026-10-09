@@ -9,33 +9,16 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       injectRegister: "auto",
-      workbox: {
-        // Shell-only cache: ≤ 25 MB to survive iOS quota.
+      // Use our hand-written service worker (sw.ts) via injectManifest.
+      // This is required because sw.ts imports workbox-* directly and
+      // references self.__WB_MANIFEST for precache manifest injection.
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.ts",
+      injectManifest: {
+        // Shell-only precache: ≤ 5 MB per file; skip large archives.
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
-        runtimeCaching: [
-          {
-            // API responses: network-first, short TTL.
-            urlPattern: /\/v1\//,
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "api-cache",
-              expiration: { maxEntries: 50, maxAgeSeconds: 60 * 5 },
-            },
-          },
-          {
-            // Archive viewer pages: cache-first (they are immutable once stored).
-            urlPattern: /\/a\//,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "archive-cache",
-              expiration: {
-                maxEntries: 100,
-                maxAgeSeconds: 60 * 60 * 24 * 7,
-              },
-            },
-          },
-        ],
       },
       manifest: {
         name: "Custom Wayback",
@@ -47,9 +30,24 @@ export default defineConfig({
         orientation: "any",
         start_url: "/",
         icons: [
-          { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+          {
+            src: "/icon-192.png",
+            sizes: "192x192",
+            type: "image/png",
+            purpose: "any maskable",
+          },
+          {
+            src: "/icon-512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "any maskable",
+          },
         ],
+      },
+      devOptions: {
+        // Enable SW in dev so we can test the SW registration flow.
+        enabled: true,
+        type: "module",
       },
     }),
   ],
@@ -65,6 +63,13 @@ export default defineConfig({
         manualChunks: {
           vendor: ["react", "react-dom", "react-router-dom"],
           query: ["@tanstack/react-query"],
+          // Radix UI primitives are sizeable; split them out so the app shell
+          // lazy-loads them only when the Dashboard or Viewer route is loaded.
+          radix: [
+            "@radix-ui/react-dialog",
+            "@radix-ui/react-popover",
+            "@radix-ui/react-slot",
+          ],
         },
       },
     },

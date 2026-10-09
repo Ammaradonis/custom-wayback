@@ -19,8 +19,8 @@
  * Tie-breaking is total, so re-running a crawl reproduces the same choices.
  */
 
-import { canonicalize, daysBetween, pathDepth, hashString } from './urlutil.ts';
-import type { CdxRow } from './wayback.ts';
+import { canonicalize, daysBetween, pathDepth, hashString } from './urlutil.js';
+import type { CdxRow } from './wayback.js';
 
 export interface SelectedPage {
   url: string;

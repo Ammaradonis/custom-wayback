@@ -11,7 +11,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
     "db:generate": "turbo run db:generate",
     "db:migrate": "turbo run db:migrate",
-    "crawl": "pnpm --filter @custom-wayback/crawler run crawl"
+    "crawl": "pnpm --filter @custom-wayback/crawler-local run crawl"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "8.16.0",

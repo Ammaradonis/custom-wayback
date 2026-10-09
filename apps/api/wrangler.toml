@@ -4,7 +4,9 @@ compatibility_date = "2024-12-18"
 compatibility_flags = ["nodejs_compat"]
 
 # ── CPU / memory limits ───────────────────────────────────────────────────────
-# Prevents a pathological archived page from burning the entire CPU allotment.
+# Prevents a pathological archived page from burning the entire CPU allotment
+# (plan.md §11.5 item 6). 30 s is the ceiling for the whole invocation; the queue
+# consumer's own batching keeps a normal message far below it.
 [limits]
 cpu_ms = 30_000
 
@@ -22,21 +24,84 @@ bucket_name = "REPLACE_WITH_YOUR_R2_BUCKET_NAME"
 # preview_bucket_name = "custom-wayback-dev"  # uncomment for local dev R2 preview
 
 # ── Cloudflare Queues ─────────────────────────────────────────────────────────
+#
+# HOW POLITENESS IS ENFORCED IN THE CLOUD (plan.md §12 rule 3)
+# -----------------------------------------------------------
+# The local runner serializes requests per host inside one process. A Worker
+# cannot: invocations are short and may overlap. So the 1-request-per-second rule
+# is enforced by *configuration* here, and by a per-invocation request budget in
+# `src/queue/fetch.ts`:
+#
+#   max_concurrency  ×  requests-per-message  ≈  requests in flight
+#   max_batch_size   ×  per-request min delay  ≈  spacing
+#
+# With the values below: at most 2 messages in flight, each spending at most 8
+# archive.org requests with a 900 ms floor between them. That keeps the observed
+# rate at or under ~1 rps against archive.org, with the circuit breaker in
+# `src/queue/ingest.ts` as the backstop when it is not enough.
+#
+# Do not raise `max_concurrency` without also re-reading §12. The cost of being
+# wrong is not a bill — it is losing access to the archive this tool depends on.
+
 [[queues.producers]]
 binding    = "INGEST_QUEUE"
 queue      = "custom-wayback-ingest"
 
+[[queues.producers]]
+binding    = "DLQ_QUEUE"
+queue      = "custom-wayback-ingest-dlq"
+
+[[queues.consumers]]
+queue                = "custom-wayback-ingest"
+max_batch_size       = 2
+max_batch_timeout    = 5
+max_retries          = 5
+max_concurrency      = 2
+dead_letter_queue    = "custom-wayback-ingest-dlq"
+
+# The dead-letter queue is consumed too — nothing is ever silently dropped, it is
+# recorded in D1 as a failed ingest with the reason attached.
+[[queues.consumers]]
+queue             = "custom-wayback-ingest-dlq"
+max_batch_size    = 10
+max_batch_timeout = 30
+max_retries       = 3
+max_concurrency   = 1
+
+# ── Cron Triggers ────────────────────────────────────────────────────────────
+# Every 5 minutes:
+#   1. purge R2 blobs for pages already served past the grace period
+#   2. prune expired rate-limit windows (an unbounded counter table is a bill)
+#   3. re-drive jobs whose consumer was evicted mid-batch
+[triggers]
+crons = ["*/5 * * * *"]
+
 # ── KV (coverage-bar cache) ───────────────────────────────────────────────────
 [[kv_namespaces]]
-binding    = "COVERAGE_KV"
-id         = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+binding = "COVERAGE_KV"
+id      = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 # preview_id = "REPLACE_WITH_YOUR_KV_PREVIEW_ID"
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# ── Static assets ────────────────────────────────────────────────────────────
 # Workers Static Assets serves the Vite build; dynamic routes go to this Worker.
+# Asset requests are free and unlimited, which is exactly the traffic profile of
+# a cached-archive reader (plan.md §4).
+#
+# `not_found_handling = "single-page-application"` is load-bearing, not a nicety:
+# without it, a deep link the React Router would handle — `/register`, or
+# `/samsung.com/2024/03/15/` from a shared link — is answered by the asset server
+# with a 404 *before* the Worker's own fallthrough ever runs. That breaks the
+# §2.1 promise that every view is a shareable, back-button-correct URL, and it
+# breaks it only on a cold load, which is the hardest kind to notice in testing.
 [assets]
 directory = "../web/dist"
 binding   = "ASSETS"
+not_found_handling = "single-page-application"
+
+# ── Observability ────────────────────────────────────────────────────────────
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 # ── Secrets (set via `wrangler secret put <name>`) ───────────────────────────
 # JWT_SECRET              — HS256 signing secret, ≥ 32 random bytes
@@ -51,10 +116,44 @@ CRAWLER_USER_AGENT   = "CustomWaybackBot/1.0 (+https://REPLACE_WITH_YOUR_DOMAIN/
 MAX_PAGES_PER_MONTH  = "1000"
 SNAPSHOT_BEHAVIOR    = "nearest"
 PURGE_GRACE_SECONDS  = "1800"
+# Throttling + cost guardrails (plan.md §11.5). These are the knobs that bound
+# what the tool can cost you in a month, so they are vars, not secrets, and they
+# are echoed back to the UI by GET /v1/usage/limits.
+CRAWL_QUOTA_PER_DAY  = "8"
+MONTHLY_BUDGET_USD   = "25"
 
 # ── Preview / dev environment ─────────────────────────────────────────────────
+# `wrangler dev` and `wrangler deploy --env dev` run entirely against local
+# Miniflare state: local D1, local R2, local Queues. No cloud spend, and no
+# archive.org traffic unless a crawl is actually started.
 [env.dev]
 name = "custom-wayback-api-dev"
+
 [env.dev.vars]
 CRAWLER_USER_AGENT  = "CustomWaybackBot/1.0-dev"
 MAX_PAGES_PER_MONTH = "50"
+CRAWL_QUOTA_PER_DAY = "50"
+MONTHLY_BUDGET_USD  = "5"
+
+[[env.dev.queues.producers]]
+binding = "INGEST_QUEUE"
+queue   = "custom-wayback-ingest-dev"
+
+[[env.dev.queues.producers]]
+binding = "DLQ_QUEUE"
+queue   = "custom-wayback-ingest-dlq-dev"
+
+[[env.dev.queues.consumers]]
+queue             = "custom-wayback-ingest-dev"
+max_batch_size    = 1
+max_batch_timeout = 2
+max_retries       = 3
+max_concurrency   = 1
+dead_letter_queue = "custom-wayback-ingest-dlq-dev"
+
+[[env.dev.queues.consumers]]
+queue             = "custom-wayback-ingest-dlq-dev"
+max_batch_size    = 10
+max_batch_timeout = 30
+max_retries       = 3
+max_concurrency   = 1

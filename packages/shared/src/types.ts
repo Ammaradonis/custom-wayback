@@ -157,4 +157,104 @@ export type UsageKind =
   | "r2_delete"
   | "bytes_stored"
   | "bytes_served"
-  | "worker_cpu_ms";
+  | "worker_cpu_ms"
+  | "worker_request"
+  | "queue_op"
+  | "throttle_wait_ms";
+
+// ── Cost monitoring (Phase 4) ────────────────────────────────────────────────
+
+/** Per-kind roll-up: what we used, what it cost, what was free. */
+export interface CostLine {
+  kind: string;
+  unit: string;
+  units: number;
+  /** Units beyond the monthly free allowance. */
+  billableUnits: number;
+  freeUnits: number;
+  costUsd: number;
+}
+
+export interface DomainCost {
+  domain: string;
+  lines: CostLine[];
+  totalUsd: number;
+  bytesStored: number;
+  iaFetches: number;
+  throttleEvents: number;
+  /** Milliseconds spent waiting on archive.org backoff. */
+  throttleWaitMs: number;
+}
+
+export interface BudgetStatus {
+  /** "ok" | "warn" | "exceeded" | "disabled" */
+  state: "ok" | "warn" | "exceeded" | "disabled";
+  budgetUsd: number;
+  spentUsd: number;
+  remainingUsd: number;
+  /** 0–1+, spent / budget. */
+  fraction: number;
+  /** True when new crawls should be refused. */
+  crawlsBlocked: boolean;
+}
+
+export interface UsageReport {
+  /** "YYYY-MM" */
+  month: string;
+  generatedAt: number;
+  /** Modelled total for the month, including the plan floor. */
+  totalUsd: number;
+  /** The fixed plan charge, listed separately so the arithmetic is checkable. */
+  planFloorUsd: number;
+  /** Sum of metered lines only. */
+  meteredUsd: number;
+  byKind: CostLine[];
+  byDomain: DomainCost[];
+  budget: BudgetStatus;
+  /** Crawl quota consumption for the current day. */
+  quota: {
+    limit: number;
+    used: number;
+    remaining: number;
+    resetsAt: number;
+  };
+  /** Throttle summary — this is the §12 "are we being a good citizen" readout. */
+  throttle: {
+    events: number;
+    byStatus: Record<string, number>;
+    lastEventAt: number | null;
+    totalWaitMs: number;
+  };
+}
+
+/** Throttle state surfaced to the UI while a crawl is running. */
+export interface ThrottleState {
+  /** True when archive.org is currently backing us off. */
+  active: boolean;
+  /** Unix seconds until we resume, or null when not waiting. */
+  resumeAt: number | null;
+  /** Consecutive throttles observed. */
+  consecutive: number;
+  /** Human-readable line for the progress panel. */
+  message: string | null;
+}
+
+// ── Ingest queue messages (Phase 4) ──────────────────────────────────────────
+
+/**
+ * One queue message = one bounded unit of work. A job's whole life is a chain
+ * of these, which is what makes it resumable: a message that dies is retried,
+ * and a retry re-reads the checkpoint instead of restarting the crawl.
+ */
+export interface IngestQueueMessage {
+  ingestId: string;
+  domain: string;
+  month: string;
+  stage: "survey" | "pages" | "assets" | "finalize";
+  /** Delivery attempt, incremented by the producer on each re-enqueue. */
+  attempt?: number;
+  /** Set when the previous message asked us to wait out a breaker. */
+  notBefore?: number;
+  enqueuedAt?: number;
+}
+

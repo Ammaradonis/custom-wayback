@@ -1,6 +1,11 @@
 /**
  * Wayback Machine client: CDX survey, Availability lookups, and raw (`id_`) replay.
  *
+ * This file is now only the half that needs a polite fetcher. The protocol half --
+ * endpoints, survey specs, CDX parsing, cache keys and the `id_` URL builders -- lives
+ * in `@custom-wayback/pipeline` and is re-exported below, so existing importers of
+ * './wayback.ts' (orchestrator.ts, pipeline.test.ts) keep working unchanged.
+ *
  * =====================================================================================
  * MEASURED archive.org BEHAVIOUR (October 2026) -- this shapes the whole module.
  * =====================================================================================
@@ -35,189 +40,52 @@
  * on-demand fetches and says so, instead of hanging for three minutes per query.
  */
 
-import { createHash } from 'node:crypto';
-import type { PoliteFetcher, FetchOutcome } from './politeness.ts';
+import {
+  AVAILABILITY_ENDPOINT,
+  buildIdUrl,
+  buildSurveyUrl,
+  cdxRowToArray,
+  exactUrlSurvey,
+  parseCdxJson,
+  surveyCacheKey,
+  tsToDay,
+} from '@custom-wayback/pipeline';
+import type {
+  CdxRow,
+  SurveyBudget,
+  SurveyCache,
+  SurveyProgress,
+  SurveyResult,
+  SurveySpec,
+} from '@custom-wayback/pipeline';
+import type { FetchOutcome, PoliteFetcher } from './politeness.ts';
 import { ThrottleError } from './politeness.ts';
-import { tsToDay } from './urlutil.ts';
 
-export const CDX_ENDPOINT = 'https://web.archive.org/cdx/search/cdx';
-export const RAW_PREFIX = 'https://web.archive.org/web';
-export const AVAILABILITY_ENDPOINT = 'https://archive.org/wayback/available';
-
-export interface CdxRow {
-  url: string;
-  ts: string;
-  mime: string;
-  status: number;
-  digest: string | null;
-  bytes: number;
-  day: string;
-}
-
-export interface SurveySpec {
-  label: string;
-  params: Record<string, string>;
-}
-
-export interface SurveyProgress {
-  (info: { label: string; requests: number; rows: number; done: boolean; note?: string }): void;
-}
-
-export interface SurveyBudget {
-  /** Wall-clock ceiling for this survey, in ms. */
-  deadlineMs: number;
-  /** Maximum HTTP requests this survey may spend. */
-  maxRequests: number;
-  /** Row cap per CDX query. */
-  limit: number;
-}
-
-/** The URL that returns the *original* bytes of a capture. */
-export function buildIdUrl(timestamp: string, originalUrl: string): string {
-  return `${RAW_PREFIX}/${timestamp}id_/${originalUrl}`;
-}
-
-export function buildReplayUrl(timestamp: string, originalUrl: string): string {
-  return `${RAW_PREFIX}/${timestamp}/${originalUrl}`;
-}
-
-/**
- * CDX query for HTML page captures in the window.
- * Note the deliberate absence of `collapse` and `showResumeKey`: both force full scans.
- * Day selection happens client-side in ledger.ts instead, which is free.
- */
-export function htmlSurvey(domain: string, from: string, to: string, limit: number): SurveySpec {
-  return {
-    label: 'html',
-    params: {
-      url: domain,
-      matchType: 'domain',
-      from,
-      to,
-      filter: 'statuscode:200',
-      limit: String(limit),
-    },
-  };
-}
-
-/**
- * CDX query for non-HTML assets. `filter=!mimetype:text/html` is cheap enough to keep
- * because the result set is bounded by `limit`; if it 504s the survey simply has no
- * asset index and assets are fetched on demand.
- */
-export function assetSurvey(domain: string, from: string, to: string, limit: number): SurveySpec {
-  return {
-    label: 'asset',
-    params: {
-      url: domain,
-      matchType: 'domain',
-      from,
-      to,
-      filter: '!mimetype:text/html',
-      limit: String(limit),
-    },
-  };
-}
-
-export function buildSurveyUrl(spec: SurveySpec): string {
-  const usp = new URLSearchParams();
-  for (const [k, v] of Object.entries(spec.params)) usp.append(k, v);
-  usp.append('output', 'json');
-  usp.append('fl', 'timestamp,original,mimetype,statuscode,digest,length');
-  return `${CDX_ENDPOINT}?${usp.toString()}`;
-}
-
-/**
- * Single-URL capture lookup within one day.
- *
- * This is the workhorse when a domain-wide survey is unavailable. A CDX query for a
- * single exact URL over a one-day range is vastly cheaper for archive.org than a
- * domain-wide range scan, and in testing it is the difference between "returns in a
- * few seconds" and "504 Gateway Timeout after 60 s".
- */
-export function exactUrlSurvey(url: string, day: string): SurveySpec {
-  return {
-    label: `exact:${new URL(url).pathname || '/'}`,
-    params: {
-      url,
-      matchType: 'exact',
-      from: `${day.replace(/-/g, '')}000000`,
-      to: `${day.replace(/-/g, '')}235959`,
-      filter: 'statuscode:200',
-      limit: '20',
-    },
-  };
-}
-
-export function surveyCacheKey(spec: SurveySpec): string {
-  return createHash('sha256').update(`${spec.label}|${JSON.stringify(spec.params)}`).digest('hex').slice(0, 24);
-}
-
-type CdxJsonRow = [string, string, string, string, string, string, string];
-
-/** Parse a CDX JSON page into rows. Tolerates the resumption-key trailer if present. */
-export function parseCdxJson(text: string): { rows: CdxRow[]; resumeKey?: string; error?: string } {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return { rows: [] };
-  if (!trimmed.startsWith('[')) {
-    return { rows: [], error: trimmed.slice(0, 300) };
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    return { rows: [], error: `unparseable CDX JSON: ${trimmed.slice(0, 200)}` };
-  }
-  if (!Array.isArray(parsed)) return { rows: [], error: 'CDX response was not an array' };
-
-  const rows: CdxRow[] = [];
-  let resumeKey: string | undefined;
-  let sawHeader = false;
-
-  for (const entry of parsed as unknown[]) {
-    if (!Array.isArray(entry)) continue;
-    const cells = entry as string[];
-    if (cells.length === 0) continue;
-    if (!sawHeader && cells[0] === 'timestamp') {
-      sawHeader = true;
-      continue;
-    }
-    if (cells.length === 1) {
-      resumeKey = cells[0]!;
-      continue;
-    }
-    if (cells.length < 6) continue;
-    const [ts, original, mime, status, digest, length] = cells as CdxJsonRow;
-    rows.push({
-      url: original,
-      ts,
-      mime: mime || 'application/octet-stream',
-      status: Number.parseInt(status || '0', 10) || 0,
-      digest: digest && digest.length > 0 ? digest : null,
-      bytes: Number.parseInt(length || '0', 10) || 0,
-      day: tsToDay(ts),
-    });
-  }
-
-  return resumeKey ? { rows, resumeKey } : { rows };
-}
-
-export interface SurveyResult {
-  rows: CdxRow[];
-  requests: number;
-  fromCache: boolean;
-  /** True when the survey stopped early because of a cap, deadline, or error. */
-  degraded: boolean;
-  /** Human-readable reason for degradation, surfaced in the report. */
-  degradedReason?: string;
-  elapsedMs: number;
-}
-
-export interface SurveyCache {
-  getSurvey(domain: string, month: string, queryHash: string): string | undefined;
-  putSurvey(domain: string, month: string, queryHash: string, payload: string): void;
-}
+// The pure protocol pieces this module used to own. Re-exported explicitly (rather than
+// `export *`) so the surface of './wayback.ts' stays exactly what it always was.
+export {
+  AVAILABILITY_ENDPOINT,
+  CDX_ENDPOINT,
+  RAW_PREFIX,
+  assetSurvey,
+  buildIdUrl,
+  buildReplayUrl,
+  buildSurveyUrl,
+  cdxRowToArray,
+  exactUrlSurvey,
+  htmlSurvey,
+  looksLikeWaybackError,
+  parseCdxJson,
+  surveyCacheKey,
+} from '@custom-wayback/pipeline';
+export type {
+  CdxRow,
+  SurveyBudget,
+  SurveyCache,
+  SurveyProgress,
+  SurveyResult,
+  SurveySpec,
+} from '@custom-wayback/pipeline';
 
 export class WaybackClient {
   private readonly fetcher: PoliteFetcher;
@@ -434,20 +302,4 @@ export class WaybackClient {
     const best = [...parsed.rows].sort((a, b) => b.bytes - a.bytes)[0];
     return best ? { row: best } : {};
   }
-}
-
-function cdxRowToArray(r: CdxRow): string[] {
-  return [r.ts, r.url, r.mime, String(r.status), r.digest ?? '', String(r.bytes)];
-}
-
-/** Detect an archive.org error page served with HTTP 200. */
-export function looksLikeWaybackError(body: Uint8Array, contentType: string): boolean {
-  if (!contentType.includes('text/html')) return false;
-  const head = new TextDecoder().decode(body.subarray(0, 4096)).toLowerCase();
-  return (
-    head.includes("wayback machine doesn't have that page archived") ||
-    head.includes('this page is not available in the wayback machine') ||
-    head.includes('cannot find the requested url') ||
-    head.includes('the wayback machine has not archived that url')
-  );
 }

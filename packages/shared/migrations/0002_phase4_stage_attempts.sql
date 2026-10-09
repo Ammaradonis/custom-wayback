@@ -1,0 +1,20 @@
+-- Per-stage delivery attempts.
+--
+-- Why this is its own migration rather than a line in 0001: 0001 had already been
+-- applied to the local database when the need for this column was discovered, and
+-- D1 records applied migrations by filename. Appending a statement to a file that
+-- has already run means the statement never executes — the schema silently drifts
+-- from the migration history, and the only symptom is a `no such column` error at
+-- runtime in whichever code path happens to touch it first. New statements go in
+-- a new file. Always.
+--
+-- What the column is for: `ingests.attempts` counts deliveries across the whole
+-- job, which is the right number to display but the wrong one to bound. A
+-- 250-page crawl legitimately takes ~125 queue messages, so a job-wide ceiling
+-- parks healthy crawls as `partial` a couple of dozen pages in. `stage_attempts`
+-- resets every time the stage advances, so the ceiling in
+-- `apps/api/src/queue/ingest.ts` bounds "attempts at one stage" — which is what
+-- it was always meant to bound, and what stops a genuinely stuck job without
+-- capping a working one.
+--> statement-breakpoint
+ALTER TABLE `ingests` ADD COLUMN `stage_attempts` integer DEFAULT 0 NOT NULL;

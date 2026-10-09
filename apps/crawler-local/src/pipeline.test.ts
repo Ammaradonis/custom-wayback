@@ -12,13 +12,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { canonicalize, pathDepth, snapshotPath, tsToDay, sameSite, shouldStubScript, isMirrorableAsset } from './urlutil.ts';
-import { selectPages, resolveLink, pickAssetCapture, isNavigablePage } from './ledger.ts';
+import {
+  canonicalize,
+  pathDepth,
+  snapshotPath,
+  tsToDay,
+  sameSite,
+  shouldStubScript,
+  isMirrorableAsset,
+  selectPages,
+  resolveLink,
+  pickAssetCapture,
+  isNavigablePage,
+} from '@custom-wayback/pipeline';
 import { cssUrls, extractPage, rewriteCss, rewritePage } from './rewrite.ts';
 import { parseCdxJson, buildIdUrl, buildSurveyUrl, htmlSurvey } from './wayback.ts';
 import { parseMonth, registrableDomain } from './config.ts';
 import { matchSnapshotRoute } from './viewer.ts';
-import type { CdxRow } from './wayback.ts';
+import type { CdxRow } from '@custom-wayback/pipeline';
 
 // --------------------------------------------------------------------- helpers
 
@@ -393,6 +404,45 @@ test('rewritePage rewrites internal links, annotates drift and quarantines dead 
   assert.ok(external.includes('data-cw-external'), 'external link flagged');
   assert.ok(external.includes('rel="noopener noreferrer nofollow"'), 'external link made safe');
   assert.equal(out.externalLinks, 1);
+});
+
+// -------------------------------------------------------- navigation metadata
+
+test('pages carry mirroring flags so the shell can show what is missing', () => {
+  const out = rewriteFixture();
+  // Attribute order is not guaranteed (linkedom serialises alphabetically), so match
+  // the tag and read the attributes rather than assuming a shape.
+  const tag = /<meta[^>]*name="cw-mirror"[^>]*>/.exec(out.html);
+  assert.ok(tag, 'cw-mirror meta must be present');
+  const contentMatch = /content="([^"]*)"/.exec(tag![0]);
+  assert.ok(contentMatch, 'cw-mirror meta must carry content');
+  // The content attribute is HTML-escaped JSON; unescape the quotes to parse it.
+  const parsed = JSON.parse(contentMatch![1]!.replace(/&quot;/g, '"'));
+  assert.equal(parsed.day, '2024-01-06');
+  assert.equal(parsed.url, 'https://www.example.com/');
+  assert.equal(parsed.flags.deadLinks, 1, 'one link has no capture in range');
+  assert.ok(parsed.flags.missingAssets >= 1, 'the dead image must be counted');
+  assert.equal(parsed.flags.stubbedScripts, 1, 'the tracker must be counted');
+});
+
+test('unresolvable links stay in the DOM so the shell can explain them', () => {
+  const out = rewriteFixture();
+  const dead = /<a[^>]*data-cw-dead[^>]*>/.exec(out.html)![0];
+  assert.ok(dead.includes('data-cw-dead="https://www.example.com/never-captured"'));
+  assert.ok(dead.includes('cw-dead-link'), 'dead links are marked for styling');
+  assert.ok(!/\shref=/.test(dead), 'and are not navigable to nowhere');
+  assert.ok(
+    out.html.includes('never-captured">Nowhere</a>'),
+    'the anchor text is preserved so surrounding prose still reads correctly',
+  );
+});
+
+test('the runtime reports progress and dead links to the host shell', () => {
+  const out = rewriteFixture();
+  assert.ok(out.html.includes('cw:ready'), 'shell is told when the page is interactive');
+  assert.ok(out.html.includes('cw:dead-links'), 'shell is told how many links are unavailable');
+  assert.ok(out.html.includes('cw:dead-request'), 'shell is told about silenced requests');
+  assert.ok(out.html.includes('data-cw-dead'), 'dead-link targets are readable from the DOM');
 });
 
 test('rewritePage annotates how far a resolved capture is from the day viewed', () => {

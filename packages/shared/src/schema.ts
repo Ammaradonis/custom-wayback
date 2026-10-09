@@ -14,6 +14,7 @@ import {
   blob,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
@@ -99,10 +100,47 @@ export const ingests = sqliteTable(
     finishedAt: integer("finished_at"),
     /** Queue message ID for cancellation / deduplication. */
     queueMsgId: text("queue_msg_id"),
+
+    // ── Phase 4: resumable job state ─────────────────────────────────────────
+    /** queued | survey | pages | assets | done — which stage the queue is on. */
+    stage: text("stage"),
+    /** How many entries of `pagesJson` have been committed. */
+    cursor: integer("cursor").notNull().default(0),
+    /** Frozen work plan: JSON SelectedPage[]. Written once, by the survey stage. */
+    pagesJson: text("pages_json"),
+    /** Frozen asset frontier: JSON {url,ts}[]. Written once, by the pages stage. */
+    assetsJson: text("assets_json"),
+    /** How many entries of `assetsJson` have been committed. */
+    assetCursor: integer("asset_cursor").notNull().default(0),
+    /** Why the survey/fetch degraded, surfaced verbatim in the UI. */
+    degradedReason: text("degraded_reason"),
+    /**
+     * JSON `{ [url]: { [day]: ts } }` for the frozen work plan. Lets the pages
+     * stage resolve an internal link to the nearest day we can actually serve,
+     * without a D1 lookup per link.
+     */
+    dayIndexJson: text("day_index_json"),
+    /** Unix seconds. A message that dies without finishing is reclaimed after this. */
+    leaseUntil: integer("lease_until"),
+    /** Delivery attempts across the whole job, for the retry/DLQ display. */
+    attempts: integer("attempts").notNull().default(0),
+    /**
+     * Delivery attempts within the *current* stage. This is the counter the
+     * delivery ceiling uses: a 250-page crawl legitimately takes ~125 messages, so
+     * a job-wide counter would park healthy crawls as `partial`. Resets whenever
+     * the stage advances.
+     */
+    stageAttempts: integer("stage_attempts").notNull().default(0),
+    /** Consecutive 429/503 responses. Drives the circuit breaker. */
+    consecutive429: integer("consecutive_429").notNull().default(0),
+    /** Unix seconds until which the circuit breaker keeps this job parked. */
+    breakerOpenUntil: integer("breaker_open_until"),
+    lastThrottleAt: integer("last_throttle_at"),
   },
   (t) => [
     uniqueIndex("ingests_domain_month").on(t.domainId, t.month),
     index("ingests_status").on(t.status),
+    index("ingests_lease").on(t.status, t.leaseUntil),
   ],
 );
 
@@ -220,4 +258,53 @@ export const usageLedger = sqliteTable(
     recordedAt: integer("recorded_at").notNull(),
   },
   (t) => [index("usage_domain_month").on(t.domain, t.month)],
+);
+
+// ── 10. Throttle telemetry (one row per 429/503 backoff) ─────────────────────
+// archive.org throttling is the number-one external risk (plan.md §12, §16).
+// Recording every backoff — with the wait we actually applied — is what lets the
+// UI say "resuming in Ns" instead of hanging silently, and lets the cost
+// dashboard show how much wall-clock time politeness is costing.
+
+export const throttleEvents = sqliteTable(
+  "throttle_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    domain: text("domain").notNull(),
+    month: text("month"),
+    ingestId: text("ingest_id"),
+    /** Host that throttled us — archive.org endpoints are the usual case. */
+    host: text("host").notNull(),
+    /** HTTP status we received: 429 | 502 | 503. */
+    status: integer("status").notNull(),
+    /** Backoff actually applied, in ms (exponential + jitter). */
+    waitMs: integer("wait_ms").notNull(),
+    attempt: integer("attempt").notNull().default(1),
+    /** True when this throttle tripped the circuit breaker. */
+    breakerOpen: integer("breaker_open", { mode: "boolean" }).notNull().default(false),
+    /** backoff | breaker | give_up */
+    kind: text("kind").notNull().default("backoff"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [index("throttle_events_domain").on(t.domain, t.createdAt)],
+);
+
+// ── 11. API rate limiting (fixed-window counters) ────────────────────────────
+// Request throttling for our own API, kept in D1 so it needs no extra service.
+// The bucket string encodes scope and identity: "user:<id>:jobs",
+// "ip:<hash>:auth". Rows are pruned by the cron trigger.
+
+export const rateLimits = sqliteTable(
+  "rate_limits",
+  {
+    bucket: text("bucket").notNull(),
+    /** Unix seconds, floored to the window size for the bucket's policy. */
+    windowStart: integer("window_start").notNull(),
+    count: integer("count").notNull().default(0),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bucket, t.windowStart] }),
+    index("rate_limits_window").on(t.windowStart),
+  ],
 );

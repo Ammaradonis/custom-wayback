@@ -23,8 +23,11 @@ import {
   STYLE_EXT,
   SCRIPT_EXT,
   FONT_EXT,
-} from './urlutil.ts';
-import { RUNTIME_CSS, RUNTIME_SCRIPT, RUNTIME_SCRIPT_ID, RUNTIME_STYLE_ID } from './runtime.ts';
+  RUNTIME_CSS,
+  RUNTIME_SCRIPT,
+  RUNTIME_SCRIPT_ID,
+  RUNTIME_STYLE_ID,
+} from '@custom-wayback/pipeline';
 
 export type AssetRole = 'image' | 'stylesheet' | 'script' | 'font' | 'media' | 'other';
 
@@ -337,7 +340,6 @@ export function rewritePage(html: string, ctx: RewriteContext): RewriteResult {
     meta.setAttribute('name', 'cw-mirror');
     meta.setAttribute('content', JSON.stringify({ day: ctx.day, url: ctx.pageUrl }));
     head.appendChild(meta);
-
     // Runtime first in head so the shims exist before any page script runs.
     const script = document.createElement('script');
     script.setAttribute('id', RUNTIME_SCRIPT_ID);
@@ -490,6 +492,7 @@ export function rewritePage(html: string, ctx: RewriteContext): RewriteResult {
     a.removeAttribute('href');
     a.setAttribute('data-cw-dead', canonical);
     a.setAttribute('title', 'not captured in the archived range');
+    a.classList.add('cw-dead-link');
     deadLinks.add(canonical);
   }
 
@@ -505,6 +508,25 @@ export function rewritePage(html: string, ctx: RewriteContext): RewriteResult {
   for (const el of document.querySelectorAll('object, param')) {
     el.remove();
     strippedNodes += 1;
+  }
+
+  // ---- per-page mirroring facts, for the shell's status chips ----
+  // Written last because the counts are only known now. The runtime reads this meta
+  // and forwards it to the host shell alongside cw:ready.
+  const mirrorMeta = document.querySelector('meta[name="cw-mirror"]');
+  if (mirrorMeta) {
+    mirrorMeta.setAttribute(
+      'content',
+      JSON.stringify({
+        day: ctx.day,
+        url: ctx.pageUrl,
+        flags: {
+          deadLinks: deadLinks.size,
+          missingAssets: missingAssets.size,
+          stubbedScripts: stubbedScripts.length,
+        },
+      }),
+    );
   }
 
   const serialized = document.toString();

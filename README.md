@@ -3,8 +3,14 @@
 Personal, mobile-first Wayback Machine browser.  
 Pick a domain + month → wait a few seconds → browse that snapshot as if it were live.
 
-> **Phase status:** Phase 0 (foundations) and Phase 1 (local crawler + viewer) are complete.  
-> Phase 2 (cloud API + React PWA) is in progress.
+> **Phase status:** Phases 0–3 are complete. **Phase 4 (production ingest) is implemented and
+> verified locally** — queues, resumable jobs, throttling, cost monitoring and the deployment
+> runbook are all in the tree and covered by tests. What remains for Phase 4 is the part that
+> needs your Cloudflare account: applying migrations to the remote D1, deploying, and the
+> account-level steps in [docs/phase-4-deployment.md](docs/phase-4-deployment.md) — §6 Access,
+> billing alerts, and the hard spend cap.
+>
+> **Before you deploy anything, read §0 of that runbook. Rotate the credentials.**
 
 ---
 
@@ -13,147 +19,137 @@ Pick a domain + month → wait a few seconds → browse that snapshot as if it w
 | Tool | Version | Notes |
 |---|---|---|
 | Node.js | ≥ 22.5 | Uses `node:sqlite` (built-in, Node 22.5+) |
-| pnpm | ≥ 9 | `npm i -g pnpm` |
+| pnpm | ≥ 9 | `npm i -g pnpm`; the repo is pinned to 9.14.4 |
 | Git | any | |
 | Playwright browsers | auto | installed by `pnpm install` via `playwright install chromium` |
-| Docker (optional) | any | only needed for MinIO local R2 stand-in |
+| Docker (optional) | any | only needed for MinIO as a local R2 stand-in |
+
+> `pnpm` is not always on `PATH`. Every command below also works as
+> `npx --no-install pnpm <args>`, which uses the pinned version from the npx cache.
 
 ---
 
-## First 30 minutes — local only, zero cloud spend
+## Phase 4 in one minute
 
-### 1. Clone and install
+The cloud ingest path runs **entirely locally** under Miniflare — real D1, real R2, real Queues,
+real queue consumer — with no Cloudflare account and no spend.
 
 ```powershell
-cd C:\Users\FingerWeg\Documents\custom-wayback   # already here
-pnpm install
-bash scripts/install-hooks.sh   # installs the gitleaks pre-commit guard
+cd apps\api
+npx --no-install pnpm exec wrangler d1 migrations apply custom-wayback-ledger --local
+npx --no-install pnpm exec wrangler dev --port 8787 --local --test-scheduled
 ```
 
-### 2. Run your first crawl (Phase 1)
+Then, from the repo root in another shell:
 
 ```powershell
-cd apps/crawler-local
-
-# Crawl example.com for January 2024, up to 25 pages
-node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning `
-     src/cli.ts crawl --domain=example.com --month=2024-01 --max-pages=25
-
-# Or a real site (be patient — 1 req/s to archive.org)
-node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning `
-     src/cli.ts crawl --domain=samsung.com --month=2024-03 --max-pages=50
+# Drives health, auth, a real crawl through the queue, cost reporting,
+# throttling and the SSE stream. Talks to archive.org for real.
+& .\scripts\phase4-smoke.ps1
 ```
 
-Output is in `apps/crawler-local/data/`.  
-The crawl respects archive.org's rate limits (≥ 1 s between requests) and backs off on 429s.
+Expected tail:
 
-### 3. Browse the mirror locally
-
-```powershell
-node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning `
-     src/cli.ts serve --port=8787
-
-# Open http://localhost:8787 in your browser
-# Or jump straight to a domain: http://localhost:8787?domain=samsung.com&month=2024-03
+```
+    stage=survey    status=queued    pages=0/3 ...
+    stage=pages     status=fetching  pages=0/3 ...
+    stage=assets    status=rewriting pages=3/3 ...
+    stage=finalize  status=ready     pages=3/3 ...
+PHASE 4 SMOKE TEST: all checks passed
 ```
 
-### 4. Check stats
+> **`.dev.vars` must live in `apps/api/`, not the repo root.** `wrangler dev` resolves it
+> relative to the Worker's own directory; a file at the root is silently ignored and every login
+> then fails with an opaque 500. `GET /v1/health` reports `secrets: false` when this happens.
+> That check exists because this mistake was made once already.
+
+### The endpoints Phase 4 adds
+
+| Endpoint | What it is for |
+|---|---|
+| `GET /v1/jobs/usage` | Cost dashboard: modelled spend, per-kind and per-domain breakdown, budget state, quota, throttle telemetry |
+| `GET /v1/jobs/usage/limits` | The throttling and budget limits currently in force |
+| `GET /v1/jobs/:id` | Now also returns `stage`, `attempts`, `degradedReason` and a `throttle` object |
+| `GET /v1/jobs/:id/events` | SSE; frames carry `stage`, `throttle.message` and `degradedReason` |
+| `GET /v1/health` | Asserts D1, R2, the queue binding **and** that required secrets are present |
+
+### Guardrails you can set
+
+| Var | Where | Default | Effect |
+|---|---|---|---|
+| `MONTHLY_BUDGET_USD` | `wrangler.toml` / `.dev.vars` | `25` | `POST /v1/jobs` returns **402** with the exact figures once crossed |
+| `CRAWL_QUOTA_PER_DAY` | same | `8` | crawls per user per UTC day, then **429** with the reset time |
+| `RATE_LIMITS.jobs` | `packages/shared/src/constants.ts` | 12/hour | throttles the start endpoint itself |
+| `MAX_PAGES_PER_MONTH` | per-domain budget | `1000` | required field; caps the frozen work plan |
+| `maxBytesPerMonth` | per-domain budget | 750 MB | hard abort mid-crawl, job marked `partial` |
+
+### Politeness knobs — read `plan.md` §12 before changing these
+
+Politeness inside a Worker cannot be an in-process gate, so it is **configuration plus a
+per-message request budget**:
+
+| Knob | Where | Default |
+|---|---|---|
+| `max_concurrency` / `max_batch_size` | `wrangler.toml` `[[queues.consumers]]` | 2 / 2 |
+| `DEFAULT_FETCH_BUDGET.maxRequests` / `.minDelayMs` | `apps/api/src/queue/fetch.ts` | 8 / 900 ms |
+| `PAGES_PER_MESSAGE` / `ASSETS_PER_MESSAGE` | `packages/shared/src/constants.ts` | 2 / 12 |
+| `BREAKER_THRESHOLD` / backoff ceiling | `packages/shared/src/policy.ts` | 5 / 60 s |
+
+Observed request rate ≈ `max_concurrency × (1 / minDelayMs)`. The shipped values keep it at or
+under ~1 request/second to archive.org. **Raising `max_concurrency` without lowering `maxRequests`
+breaks that** — and the cost of being wrong is not a bill, it is losing access to the archive this
+tool depends on.
+
+---
+
+## Deployment scripts
 
 ```powershell
-node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning `
-     src/cli.ts stats
+# R2 lifecycle rules (raw/ → IA at 30d, delete at 180d, abort stale multipart uploads)
+node scripts/set-r2-lifecycle.mjs --bucket custom-wayback --dry-run
+
+# Billing alert thresholds ($10 / $50 / $200). The hard spend cap is dashboard-only.
+node scripts/set-billing-alerts.mjs --dry-run
 ```
 
-### pnpm shortcuts (from the repo root)
+Full runbook, including the induced-429 acceptance test and the rollback table:
+[docs/phase-4-deployment.md](docs/phase-4-deployment.md).
+
+---
+
+## Tests
 
 ```powershell
-# Crawl
-pnpm --filter @custom-wayback/crawler-local run crawl -- --domain=samsung.com --month=2024-03 --max-pages=100
+npx --no-install pnpm turbo run typecheck   # 7 packages
+npx --no-install pnpm turbo run test        # 66 tests: 33 pipeline/crawler, 33 api
+```
 
-# Serve
-pnpm --filter @custom-wayback/crawler-local run serve
+`apps/api`'s tests run the **shipping module graph**: `scripts/run-api-tests.mjs` bundles each test
+file with the same esbuild that `wrangler deploy` uses, so `.js` import specifiers and workspace
+links resolve exactly as they do in production. The queue consumer is driven end to end against a
+fake D1/R2/Queues with a stubbed network, which is the only way to test the parts that matter —
+stage transitions, cursor resumption, and a 429 storm that no real run can schedule.
 
-# Stats
+---
+
+## Local-only workflow (Phases 1–3)
+
+```powershell
+# Crawl one domain, one month, into a browsable local mirror
+pnpm --filter @custom-wayback/crawler-local run crawl -- --domain=samsung.com --month=2024-03 --max-pages=50
+
+# Browse it
+pnpm --filter @custom-wayback/crawler-local run serve      # http://localhost:8787
+
+# Stats table
 pnpm --filter @custom-wayback/crawler-local run stats
 ```
 
----
+Output lands in `apps/crawler-local/data/`. The crawl respects archive.org's rate limits
+(≥ 1 s between requests) and backs off on 429s. **Never reduce `--min-delay-ms` below 250** —
+the CLI enforces this.
 
-## Phase 2 — Cloudflare Workers + React PWA
-
-### Before you deploy: rotate all credentials
-
-`env-sensitive-so-never-expose-in-the-chat-log.txt` contains live credentials in plaintext.  
-**Rotate everything before any code touches it.** Follow `plan.md §13`:
-
-1. Revoke the GitHub PAT
-2. Rotate both Cloudflare API tokens (replace with a scoped token)
-3. Rotate the R2 access key pair (replace with a bucket-scoped write-only key)
-4. Regenerate the webhook signing secret
-
-### Local dev with Wrangler
-
-```powershell
-# 1. Copy the example vars and fill in your rotated credentials
-Copy-Item .dev.vars.example .dev.vars
-# Edit .dev.vars — see the comments inside
-
-# 2. Fill in the three REPLACE_WITH_ placeholders in apps/api/wrangler.toml:
-#    - database_id    (from `wrangler d1 list`)
-#    - bucket_name    (from your Cloudflare R2 dashboard)
-#    - KV namespace id (from `wrangler kv namespace list`)
-
-# 3. Apply D1 migrations
-cd apps/api
-pnpm exec wrangler d1 migrations apply custom-wayback-ledger --local
-
-# 4. Start MinIO (R2 stand-in)
-cd ../..
-docker compose up -d
-
-# 5. Start the Worker and web dev servers in parallel
-pnpm dev
-```
-
-The Vite dev server proxies `/v1/*` and `/a/*` to the Wrangler dev Worker on `:8787`.
-
-### Deploy to production
-
-```powershell
-# Set secrets (run once)
-cd apps/api
-pnpm exec wrangler secret put JWT_SECRET
-pnpm exec wrangler secret put STORAGE_ACCESS_KEY_ID
-pnpm exec wrangler secret put STORAGE_SECRET_ACCESS_KEY
-
-# Apply migrations to production D1
-pnpm exec wrangler d1 migrations apply custom-wayback-ledger --remote
-
-# Deploy
-pnpm exec wrangler deploy
-```
-
-CI does this automatically on every push to `main`.
-
----
-
-## Repository layout
-
-```
-apps/
-  crawler-local/   Phase 1: local Node crawler + viewer (no cloud deps)
-  crawler/         Phase 2: same crawler, wired to Cloudflare Queues + R2
-  api/             Cloudflare Worker: auth, domains, jobs, archive viewer
-  web/             React 19 + Vite PWA shell
-packages/
-  shared/          Drizzle D1 schema, Zod types, shared constants
-scripts/
-  install-hooks.sh gitleaks pre-commit guard
-```
-
----
-
-## Crawler CLI reference
+### Crawler CLI reference
 
 ```
 node src/cli.ts crawl --domain=<domain> --month=YYYY-MM [options]
@@ -181,29 +177,54 @@ Options:
 
 ---
 
-## Etiquette / archive.org limits
+## Repository layout
 
-This tool stays at ≥ 1 s between requests, sends an honest User-Agent with contact info,
-backs off exponentially on 429/503, and stops the survey rather than hanging on a 504.
-See `plan.md §12` for the full etiquette rules.
-
-**Never reduce `--min-delay-ms` below 250.** The CLI enforces this.
+```
+apps/
+  crawler-local/   Local Node crawler + viewer. No cloud dependencies, no spend.
+  api/             Cloudflare Worker: auth, domains, jobs, cost reporting, and the
+                   queue consumer that performs cloud ingestion.
+  web/             React 19 + Vite PWA shell (picker, viewer, cost panel).
+packages/
+  pipeline/        Runtime-agnostic ingest logic (URL canonicalisation, CDX specs and
+                   parsing, day selection, mirror runtime) shared by crawler-local and
+                   the Worker's queue consumer. Standard globals only — no Node, no DOM.
+  shared/          Drizzle D1 schema, Zod types, cost model, politeness policy, migrations.
+scripts/
+  install-hooks.sh        gitleaks pre-commit guard
+  phase4-smoke.ps1        end-to-end smoke test against a local Worker
+  set-r2-lifecycle.mjs    R2 lifecycle rules
+  set-billing-alerts.mjs  billing alert thresholds
+docs/
+  phase-4-deployment.md   the Phase 4 runbook
+```
 
 ---
 
-## Cost (cloud, when you use Phase 2)
+## Etiquette / archive.org limits
 
-Personal use (2 domains, ~400 pages/month): **≈ $6/month** (Workers Paid plan $5 + R2 storage).  
-Running the crawler from your own PC keeps it at **$0–2/month**.  
-See `plan.md §11` for the full cost breakdown.
+This tool stays at ≥ 1 s between requests, sends an honest User-Agent with contact info, backs off
+exponentially on 429/503, records every backoff in `throttle_events`, and parks a throttled job
+rather than hammering a service that asked it to stop. See `plan.md` §12 for the full rules.
+
+---
+
+## Cost (cloud)
+
+Personal use (2 domains, ~400 pages/month): **≈ $6/month** (Workers Paid plan $5 + R2 storage).
+Running the crawler from your own PC keeps it at **$0–2/month**. `GET /v1/jobs/usage` reports the
+same line items the invoice does, computed from usage recorded as the work happens — see
+[plan.md](plan.md) §11 for the unit prices and their sources.
 
 ---
 
 ## Security notes
 
-- Passwords hashed with **Argon2id** (via `oslo/password`)
+- Passwords hashed with **PBKDF2-HMAC-SHA-256** (600,000 iterations, the OWASP figure). Argon2id
+  is the better algorithm, but `oslo/password` ships native binaries that cannot be bundled into a
+  Worker; [`apps/api/src/lib/password.ts`](apps/api/src/lib/password.ts) explains the trade-off and
+  the migration path.
 - JWTs signed with **HS256**, 7-day TTL, revocable via the sessions table
-- R2 content deleted after the user has visited the page (storage-cost strategy)
 - Archived pages served in a `sandbox="allow-scripts allow-forms allow-popups"` iframe
 - Strict `Content-Security-Policy` on every served snapshot
 - `gitleaks` scans every commit; see `.gitleaks.toml`

@@ -82,9 +82,119 @@ export const domains = {
 
 // ── Ingest ────────────────────────────────────────────────────────────────────
 
+/**
+ * Cost-monitoring types — mirrors `packages/shared/src/types.ts`, which is the
+ * single source of truth. They are redeclared here rather than imported because
+ * `@custom-wayback/shared` exposes only its barrel (`dist/index.js`), and that
+ * barrel re-exports `./schema.js`, which imports zod and drizzle-orm. Importing
+ * *anything* from the barrel would either drag those runtime deps into the
+ * browser bundle or force a build of the shared package before the web build.
+ * Keep these in lockstep with packages/shared/src/types.ts.
+ */
+
+/** Per-kind roll-up: what we used, what it cost, what was free. */
+export interface CostLine {
+  kind: string;
+  unit: string;
+  units: number;
+  /** Units beyond the monthly free allowance. */
+  billableUnits: number;
+  freeUnits: number;
+  costUsd: number;
+}
+
+export interface DomainCost {
+  domain: string;
+  lines: CostLine[];
+  totalUsd: number;
+  bytesStored: number;
+  iaFetches: number;
+  throttleEvents: number;
+  /** Milliseconds spent waiting on archive.org backoff. */
+  throttleWaitMs: number;
+}
+
+export interface BudgetStatus {
+  state: "ok" | "warn" | "exceeded" | "disabled";
+  budgetUsd: number;
+  spentUsd: number;
+  /** May be `Infinity` when the guardrail is disabled. */
+  remainingUsd: number;
+  /** 0–1+, spent / budget. */
+  fraction: number;
+  /** True when new crawls should be refused. */
+  crawlsBlocked: boolean;
+}
+
+export interface UsageReport {
+  /** "YYYY-MM" */
+  month: string;
+  /** Unix seconds. */
+  generatedAt: number;
+  /** Modelled total for the month, including the plan floor. */
+  totalUsd: number;
+  /** The fixed plan charge, listed separately so the arithmetic is checkable. */
+  planFloorUsd: number;
+  /** Sum of metered lines only. */
+  meteredUsd: number;
+  byKind: CostLine[];
+  byDomain: DomainCost[];
+  budget: BudgetStatus;
+  /** Crawl quota consumption for the current day. */
+  quota: { limit: number; used: number; remaining: number; resetsAt: number };
+  /** Throttle summary — the §12 "are we being a good citizen" readout. */
+  throttle: {
+    events: number;
+    byStatus: Record<string, number>;
+    /** Unix seconds, or null when nothing has been throttled. */
+    lastEventAt: number | null;
+    totalWaitMs: number;
+  };
+}
+
+/** `GET /v1/jobs/usage/limits` — the limits currently in force. */
+export interface UsageLimits {
+  crawlQuotaPerDay: number;
+  crawlQuotaRemaining: number;
+  /** Unix seconds. */
+  crawlQuotaResetsAt: number;
+  monthlyBudgetUsd: number;
+  readLimitPerMinute: number;
+}
+
+/** Throttle state surfaced while a crawl is running. Mirrors the shared type. */
+export interface ThrottleState {
+  /** True when archive.org is currently backing us off. */
+  active: boolean;
+  /** Unix seconds until we resume, or null when not waiting. */
+  resumeAt: number | null;
+  consecutive: number;
+  /** Human-readable line for the progress panel. */
+  message: string | null;
+}
+
+/** One `{ type: "progress", … }` frame from `/v1/jobs/:ingestId/events`. */
+export interface IngestProgressEvent {
+  type: string;
+  ingestId?: string;
+  status?: string;
+  stage?: string | null;
+  pagesTotal?: number;
+  pagesDone?: number;
+  assetsTotal?: number;
+  assetsDone?: number;
+  bytesStored?: number;
+  ia429Count?: number;
+  attempts?: number;
+  degradedReason?: string | null;
+  throttle?: ThrottleState;
+}
+
 export interface IngestJob {
   id: string;
   status: string;
+  /** Pipeline stage: survey | pages | assets | finalize | done. */
+  stage: string | null;
   pagesTotal: number;
   pagesDone: number;
   assetsTotal: number;
@@ -92,6 +202,11 @@ export interface IngestJob {
   bytesStored: number;
   ia429Count: number;
   errorMessage: string | null;
+  /** Queue delivery attempts spent on this job. */
+  attempts: number;
+  /** Set when the crawl finished with a caveat (e.g. byte cap hit). */
+  degradedReason: string | null;
+  throttle: ThrottleState;
 }
 
 export const ingest = {
@@ -101,7 +216,14 @@ export const ingest = {
     request<IngestJob>("GET", `/jobs/${ingestId}`),
   cancel: (ingestId: string) =>
     request<{ ok: boolean }>("DELETE", `/jobs/${ingestId}`),
-  usage: () => request<{ month: string; usage: unknown[] }>("GET", "/jobs/usage"),
+  /** Cost report for one month (`YYYY-MM`); the API defaults to the current month. */
+  usage: (month?: string) =>
+    request<UsageReport>(
+      "GET",
+      month ? `/jobs/usage?month=${encodeURIComponent(month)}` : "/jobs/usage",
+    ),
+  /** The quota/budget/rate limits currently in force. */
+  usageLimits: () => request<UsageLimits>("GET", "/jobs/usage/limits"),
 };
 
 // ── SSE helper ────────────────────────────────────────────────────────────────

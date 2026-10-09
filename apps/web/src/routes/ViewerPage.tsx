@@ -281,10 +281,13 @@ export default function ViewerPage() {
           className="absolute inset-0 w-full h-full border-0 bg-white"
           onLoad={() => {
             setLoading(false);
-            // Wire in-iframe link clicks so day-strip stays in sync.
+            // Wire in-iframe link clicks so day-strip stays in sync,
+            // then prefetch the top 8 same-mirror links via the service worker.
             try {
               const doc = iframeRef.current?.contentDocument;
               if (!doc) return;
+
+              // Click intercept for /a/ links.
               doc.addEventListener("click", (e: MouseEvent) => {
                 const a = (e.target as Element)?.closest?.("a[href]");
                 if (!a) return;
@@ -296,8 +299,26 @@ export default function ViewerPage() {
                 navigate(href);
                 goRoute(targetDay, href, true);
               }, true);
+
+              // SW prefetch: collect unique /a/ hrefs from the page, take top 8.
+              const links = Array.from(doc.querySelectorAll<HTMLAnchorElement>("a[href^='/a/']"))
+                .map((a) => a.href)
+                .filter((href, i, arr) => arr.indexOf(href) === i)
+                .slice(0, 8);
+
+              if (
+                links.length > 0 &&
+                "serviceWorker" in navigator &&
+                navigator.serviceWorker.controller
+              ) {
+                navigator.serviceWorker.controller.postMessage({
+                  type: "PREFETCH",
+                  urls: links,
+                });
+              }
             } catch {
-              // Cross-origin iframe; links work natively.
+              // Cross-origin iframe: click intercept silently fails;
+              // links work natively. Prefetch not possible cross-origin.
             }
           }}
         />

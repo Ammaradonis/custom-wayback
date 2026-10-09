@@ -1,35 +1,24 @@
 /**
- * Auth utilities: Argon2id password hashing (via the Web Crypto API + oslo),
- * JWT issue/verify using HS256, and session revocation via D1.
+ * Auth utilities: password hashing, JWT issue/verify using HS256, and session
+ * revocation via D1.
  *
  * Design notes:
- *  - Argon2id is the OWASP-recommended choice for 2024+.
- *    oslo/password wraps it and falls back to PBKDF2 in runtimes that lack
- *    native Argon2; Cloudflare Workers does have native support.
+ *  - Password hashing lives in `./password.ts` and uses PBKDF2-HMAC-SHA-256 via
+ *    WebCrypto. Read that file's header before changing it: the short version is
+ *    that `oslo/password`'s Argon2id is the better algorithm but ships native
+ *    bindings that cannot be bundled into a Worker, so it is not usable here.
  *  - JWTs are short-lived (7 days) but immediately revocable via the sessions
  *    table in D1 (jti claim matched against sessions.id).
  *  - IP addresses are never stored raw — only sha256(ip) so we cannot
  *    re-identify users from the session table alone.
  */
 
-import { Argon2id } from "oslo/password";
+import { hashPassword, verifyPassword, dummyVerify, needsRehash } from "./password.js";
 import type { Env } from "../env.js";
 import { JWT_ALGORITHM, JWT_TTL_SECONDS } from "@custom-wayback/shared";
 
-const argon2 = new Argon2id();
-
-// ── Password hashing ─────────────────────────────────────────────────────────
-
-export async function hashPassword(password: string): Promise<string> {
-  return argon2.hash(password);
-}
-
-export async function verifyPassword(
-  hash: string,
-  password: string,
-): Promise<boolean> {
-  return argon2.verify(hash, password);
-}
+// Re-exported so route handlers keep importing password concerns from one place.
+export { hashPassword, verifyPassword, needsRehash, dummyVerify };
 
 // ── JWT (HS256 via Web Crypto) ────────────────────────────────────────────────
 

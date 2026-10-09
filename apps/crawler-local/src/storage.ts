@@ -15,12 +15,22 @@ import { dirname, join, resolve, sep } from 'node:path';
 export interface PutResult {
   key: string;
   bytes: number;
-  /** True when the bytes were already present (content-addressed hit, no write). */
+  /** True when the bytes were already present AND no write was needed. */
   deduped: boolean;
 }
 
 export interface BlobStore {
-  put(key: string, body: Uint8Array): Promise<PutResult>;
+  /**
+   * Write bytes at `key`.
+   *
+   * `replace` defaults to false, which makes this an insert-if-absent. That is correct
+   * for content-addressed assets (an identical hash means identical bytes), but WRONG
+   * for page blobs: re-rewriting a page with a better shim or a tighter CSP produces
+   * different bytes at the same key, and a silent no-op would report success while
+   * leaving stale HTML on disk. Callers that may be updating a page must pass
+   * `replace: true`.
+   */
+  put(key: string, body: Uint8Array, replace?: boolean): Promise<PutResult>;
   get(key: string): Promise<Uint8Array | undefined>;
   has(key: string): Promise<boolean>;
   /** Total bytes currently stored (sum of file sizes). */
@@ -65,8 +75,8 @@ export class FsBlobStore implements BlobStore {
     }
   }
 
-  async put(key: string, body: Uint8Array): Promise<PutResult> {
-    if (await this.has(key)) return { key, bytes: body.byteLength, deduped: true };
+  async put(key: string, body: Uint8Array, replace = false): Promise<PutResult> {
+    if (!replace && (await this.has(key))) return { key, bytes: body.byteLength, deduped: true };
     const full = this.pathFor(key);
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, body);
@@ -135,10 +145,10 @@ export class MemoryBlobStore implements BlobStore {
     return this.map.has(key);
   }
 
-  async put(key: string, body: Uint8Array): Promise<PutResult> {
+  async put(key: string, body: Uint8Array, replace = false): Promise<PutResult> {
     const existed = this.map.has(key);
-    if (!existed) this.map.set(key, body);
-    return { key, bytes: body.byteLength, deduped: existed };
+    if (!existed || replace) this.map.set(key, body);
+    return { key, bytes: body.byteLength, deduped: existed && !replace };
   }
 
   async get(key: string): Promise<Uint8Array | undefined> {
