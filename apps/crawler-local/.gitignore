@@ -1,0 +1,9 @@
+# Local mirror output. Never commit crawled content, ledgers or manifests.
+data/
+*.db
+*.db-journal
+*.db-wal
+.env
+.env.*
+.dev.vars*
+*.local

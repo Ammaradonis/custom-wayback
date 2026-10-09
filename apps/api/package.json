@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@custom-wayback/shared": "workspace:*",
+    "@hono/zod-validator": "0.4.2",
     "hono": "4.6.14",
     "oslo": "1.2.1",
     "zod": "3.23.8"

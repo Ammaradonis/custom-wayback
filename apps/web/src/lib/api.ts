@@ -31,7 +31,7 @@ async function request<T>(
   const resp = await fetch(`${BASE}${path}`, {
     method,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
 
   if (resp.status === 401) {
@@ -114,8 +114,7 @@ export function watchIngest(
   const token = getToken();
   if (!token) return () => void 0;
 
-  const url = `${BASE}/jobs/${ingestId}/events`;
-  const es = new EventSource(url);
+  const es = new EventSource(`${BASE}/jobs/${ingestId}/events`);
 
   es.onmessage = (e) => {
     const data = JSON.parse(e.data as string) as { type: string };
@@ -132,3 +131,44 @@ export function watchIngest(
 
   return () => es.close();
 }
+
+// ── Manifest / sites ─────────────────────────────────────────────────────────
+
+export interface SiteEntry {
+  domain: string;
+  month: string;
+  pages: number;
+  days: number;
+}
+
+export interface ManifestPage {
+  url: string;
+  day: string;
+  ts: string;
+  title: string | null;
+  bytes: number | null;
+  route: string;
+  resolvedDay: string | null;
+  deltaDays: number | null;
+  stored: boolean;
+  purged: boolean;
+}
+
+export interface Manifest {
+  version: number;
+  domain: string;
+  month: string;
+  days: string[];
+  pages: ManifestPage[];
+  stats: unknown;
+  note?: string;
+}
+
+export const manifests = {
+  sites: () => request<{ sites: SiteEntry[] }>("GET", "/sites"),
+  manifest: (domain: string, month: string) =>
+    request<Manifest>(
+      "GET",
+      `/manifest?domain=${encodeURIComponent(domain)}&month=${encodeURIComponent(month)}`,
+    ),
+};

@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "exactOptionalPropertyTypes": false,
+    "noPropertyAccessFromIndexSignature": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "$comment": [
+    "Imports use explicit './x.ts' specifiers on purpose: Node 22.6+ strips TypeScript",
+    "types at runtime, so `node --experimental-strip-types src/cli.ts` runs this package",
+    "with no bundler and no build step -- which is the point of a local ingest tool.",
+    "Consequence: avoid TypeScript syntax that requires transformation (constructor",
+    "parameter properties, enums, namespaces). tsc still typechecks the same source."
+  ]
+}

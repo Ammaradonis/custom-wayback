@@ -1,0 +1,26 @@
+{
+  "name": "@custom-wayback/crawler-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase 1: local ingestion of one domain and one month from the Wayback Machine into a browsable local mirror. Self-contained; no Cloudflare account, no cloud spend.",
+  "bin": {
+    "crawl-local": "./src/cli.ts"
+  },
+  "scripts": {
+    "crawl": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts crawl",
+    "serve": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts serve",
+    "stats": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts stats",
+    "dev": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --ext .ts",
+    "test": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning --test src/*.test.ts"
+  },
+  "dependencies": {
+    "linkedom": "0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.1"
+  }
+}

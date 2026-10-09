@@ -20,6 +20,7 @@ import { authRouter } from "./routes/auth.js";
 import { domainsRouter } from "./routes/domains.js";
 import { ingestRouter } from "./routes/ingest.js";
 import { viewerRouter } from "./routes/viewer.js";
+import { manifestRouter } from "./routes/manifest.js";
 import { purgeStaleCachedPages } from "./lib/r2.js";
 import type { Env } from "./env.js";
 
@@ -32,8 +33,6 @@ app.use("*", logger());
 app.use(
   "*",
   secureHeaders({
-    // Remove server identity headers.
-    xPoweredBy: false,
     // Prevent clickjacking on the app shell.
     xFrameOptions: "SAMEORIGIN",
     // Strict transport (set here; Cloudflare also enforces it at the edge).
@@ -72,6 +71,7 @@ app.use(
 app.route("/v1/auth", authRouter);
 app.route("/v1/domains", domainsRouter);
 app.route("/v1/jobs", ingestRouter);
+app.route("/v1", manifestRouter);
 app.route("/a", viewerRouter);
 
 // ── Health check ──────────────────────────────────────────────────────────────

@@ -9,10 +9,12 @@
  *  and we redirect to the nearest captured day.
  */
 
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../env.js";
 import { serveCachedPage, markServed } from "../lib/r2.js";
 import { WAYBACK_RAW_BASE } from "@custom-wayback/shared";
+
+type HonoCtx = Context<{ Bindings: Env }>;
 
 export const viewerRouter = new Hono<{ Bindings: Env }>();
 
@@ -64,7 +66,7 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
 
   // 4. Try Workers Cache API → R2.
   const cacheKey = `https://cache.internal/a/${domain}/${day}${path}`;
-  const response = await serveCachedPage(snap.r2_key, cacheKey, c.env, c.executionCtx);
+  const response = await serveCachedPage(snap.r2_key, cacheKey, c.env, c.executionCtx as unknown as ExecutionContext);
   if (response) {
     // Record served_at (fire-and-forget) so purge job can act.
     c.executionCtx.waitUntil(markServed(c.env, snap.id));
