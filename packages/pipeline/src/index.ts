@@ -8,6 +8,7 @@
  */
 
 export * from './config.js';
+export * from './head.js';
 export * from './runtime.js';
 export * from './selection.js';
 export * from './text.js';
