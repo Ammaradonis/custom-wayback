@@ -1,0 +1,48 @@
+# ── Secrets (NEVER commit these) ─────────────────────────────────────
+env.txt
+env-sensitive-so-never-expose-in-the-chat-log.txt
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+*.local
+.wrangler/
+
+# ── Node ──────────────────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.turbo/
+
+# ── Wrangler / Cloudflare ─────────────────────────────────────────────
+.wrangler/
+worker-configuration.d.ts
+
+# ── pnpm / package managers ───────────────────────────────────────────
+.pnpm-store/
+pnpm-debug.log
+
+# ── TypeScript ────────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ── Vite ─────────────────────────────────────────────────────────────
+apps/web/dist/
+
+# ── OS ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs ─────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── SQLite local dev ─────────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+
+# ── MinIO local dev ──────────────────────────────────────────────────
+.minio-data/
+
+# ── Test coverage ────────────────────────────────────────────────────
+coverage/

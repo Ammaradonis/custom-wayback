@@ -1,0 +1,10 @@
+# Local ingestion output for apps/crawler (Phase 1).
+# Never commit crawled content or local mirrors.
+data/
+*.db
+*.db-journal
+*.db-wal
+.env
+.env.*
+.dev.vars*
+*.local

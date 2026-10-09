@@ -1,0 +1,60 @@
+name = "custom-wayback-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-18"
+compatibility_flags = ["nodejs_compat"]
+
+# ── CPU / memory limits ───────────────────────────────────────────────────────
+# Prevents a pathological archived page from burning the entire CPU allotment.
+[limits]
+cpu_ms = 30_000
+
+# ── D1 ledger ────────────────────────────────────────────────────────────────
+[[d1_databases]]
+binding      = "DB"
+database_name = "custom-wayback-ledger"
+database_id  = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "../../packages/shared/migrations"
+
+# ── R2 bucket ────────────────────────────────────────────────────────────────
+[[r2_buckets]]
+binding     = "STORAGE"
+bucket_name = "REPLACE_WITH_YOUR_R2_BUCKET_NAME"
+# preview_bucket_name = "custom-wayback-dev"  # uncomment for local dev R2 preview
+
+# ── Cloudflare Queues ─────────────────────────────────────────────────────────
+[[queues.producers]]
+binding    = "INGEST_QUEUE"
+queue      = "custom-wayback-ingest"
+
+# ── KV (coverage-bar cache) ───────────────────────────────────────────────────
+[[kv_namespaces]]
+binding    = "COVERAGE_KV"
+id         = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+# preview_id = "REPLACE_WITH_YOUR_KV_PREVIEW_ID"
+
+# ── Routes ───────────────────────────────────────────────────────────────────
+# Workers Static Assets serves the Vite build; dynamic routes go to this Worker.
+[assets]
+directory = "../web/dist"
+binding   = "ASSETS"
+
+# ── Secrets (set via `wrangler secret put <name>`) ───────────────────────────
+# JWT_SECRET              — HS256 signing secret, ≥ 32 random bytes
+# STORAGE_ACCESS_KEY_ID   — R2 bucket-scoped key (write-only for crawler)
+# STORAGE_SECRET_ACCESS_KEY
+# STORAGE_ENDPOINT        — https://<account_id>.r2.cloudflarestorage.com
+# STORAGE_BUCKET_NAME
+
+# ── Environment vars (non-secret) ────────────────────────────────────────────
+[vars]
+CRAWLER_USER_AGENT   = "CustomWaybackBot/1.0 (+https://REPLACE_WITH_YOUR_DOMAIN/bot)"
+MAX_PAGES_PER_MONTH  = "1000"
+SNAPSHOT_BEHAVIOR    = "nearest"
+PURGE_GRACE_SECONDS  = "1800"
+
+# ── Preview / dev environment ─────────────────────────────────────────────────
+[env.dev]
+name = "custom-wayback-api-dev"
+[env.dev.vars]
+CRAWLER_USER_AGENT  = "CustomWaybackBot/1.0-dev"
+MAX_PAGES_PER_MONTH = "50"

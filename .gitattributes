@@ -1,0 +1,9 @@
+# Normalize line endings to LF on commit, check out as-is.
+* text=auto eol=lf
+
+# Force LF for shell scripts.
+*.sh text eol=lf
+
+# Treat compiled output as binary.
+dist/** binary
+*.wasm binary

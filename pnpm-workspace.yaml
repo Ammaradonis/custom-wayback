@@ -1,0 +1,11 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# pnpm 10 does not run dependency lifecycle scripts unless they are allowlisted.
+# Nothing in this workspace needs one, but esbuild/workerd are common additions
+# for the api and web apps, so declare the intent explicitly.
+onlyBuiltDependencies:
+  - esbuild
+  - workerd
+  - sharp

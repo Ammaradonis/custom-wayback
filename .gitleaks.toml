@@ -1,0 +1,43 @@
+# Gitleaks configuration — run as a pre-commit hook and in CI.
+# Install: https://github.com/gitleaks/gitleaks#installing
+# Pre-commit hook: add to .git/hooks/pre-commit (see scripts/install-hooks.sh)
+
+title = "custom-wayback gitleaks config"
+
+[extend]
+# Extend the default ruleset that catches common secret patterns.
+useDefault = true
+
+[[rules]]
+id          = "cloudflare-api-token"
+description = "Cloudflare API Token"
+regex       = '''(?i)(cloudflare[_\-]?(api[_\-]?)?token\s*[:=]\s*)([A-Za-z0-9_\-]{40})'''
+secretGroup = 3
+
+[[rules]]
+id          = "r2-access-key"
+description = "R2 / S3 access key pair"
+regex       = '''(?i)(access[_\-]?key[_\-]?id\s*[:=]\s*)([A-Za-z0-9+/]{20,})'''
+secretGroup = 2
+
+[[rules]]
+id          = "jwt-secret-inline"
+description = "JWT_SECRET inline value"
+regex       = '''(?i)jwt[_\-]?secret\s*[:=]\s*['"]?([A-Za-z0-9+/=_\-]{32,})['"]?'''
+secretGroup = 1
+
+[allowlist]
+# Never flag these paths (they contain example / placeholder values only).
+paths = [
+  ".dev.vars.example",
+  "plan.md",
+  "random-thoughts.txt",
+  ".gitleaks.toml",
+]
+
+# Placeholder tokens that appear in docs/config examples.
+regexes = [
+  "REPLACE_WITH_",
+  "YOUR_.*_HERE",
+  "minioadmin",
+]
