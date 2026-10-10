@@ -42,10 +42,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # 22.5 is the floor the crawler needs for `node:sqlite`, which is still
-          # experimental-flagged at that point -- hence the --experimental-* flags
-          # in apps/crawler-local's scripts.
-          node-version: "22.5"
+          # Tracks latest 22.x. The floor is 22.6, not 22.5: `node:sqlite` lands in
+          # 22.5, but apps/crawler-local's test script also passes
+          # --experimental-strip-types, which only exists from 22.6 ("node: bad
+          # option" below that). Both are flagged experimental, hence the
+          # --experimental-* flags in the crawler's scripts.
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -83,7 +85,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.5"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -116,7 +118,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.5"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -143,7 +145,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.5"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -197,7 +199,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.5"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies

@@ -18,7 +18,7 @@ Pick a domain + month → wait a few seconds → browse that snapshot as if it w
 
 | Tool | Version | Notes |
 |---|---|---|
-| Node.js | ≥ 22.5 | Uses `node:sqlite` (built-in, Node 22.5+) |
+| Node.js | ≥ 22.6 | Uses `node:sqlite` (22.5+) and `--experimental-strip-types` (22.6+) |
 | pnpm | ≥ 9 | `npm i -g pnpm`; the repo is pinned to 9.14.4 |
 | Git | any | |
 | Playwright browsers | auto | installed by `pnpm install` via `playwright install chromium` |
