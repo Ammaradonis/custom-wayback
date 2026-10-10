@@ -29,6 +29,12 @@ import { dirname, join, resolve } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const webRoot = resolve(here, "..");
 const shots = join(here, "__screens__");
+
+const viteBin = join(webRoot, "node_modules", "vite", "bin", "vite.js");
+if (!existsSync(viteBin)) {
+  console.error(`SKIP: vite not found at ${viteBin}`);
+  process.exit(0);
+}
 if (!existsSync(shots)) mkdirSync(shots, { recursive: true });
 
 // ── Playwright loader (same strategy as visual-check.mjs) ────────────────────
@@ -147,50 +153,60 @@ async function pickPort() {
   });
 }
 
-const port = await pickPort();
-const url = `http://127.0.0.1:${port}/`;
+/**
+ * Start Vite on a free port.
+ *
+ * `pickPort` asks the OS for an unused port and then releases it, so there is a
+ * window in which something else can take it — and Vite is started with
+ * `--strictPort`, so that race shows up as "dev server did not start" rather than
+ * a silent fallback to another port. Retrying the whole start closes the window
+ * without giving up the guarantee that we talk to *our* server.
+ */
+async function startVite(attempts = 4) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const port = await pickPort();
+    const base = `http://127.0.0.1:${port}/`;
+    const child = spawn(
+      process.execPath,
+      [viteBin, "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+      { cwd: webRoot, stdio: ["ignore", "pipe", "pipe"] },
+    );
 
-const viteBin = join(webRoot, "node_modules", "vite", "bin", "vite.js");
-if (!existsSync(viteBin)) {
-  console.error(`SKIP: vite not found at ${viteBin}`);
-  process.exit(0);
-}
+    let log = "";
+    child.stdout.on("data", (d) => (log += d.toString()));
+    child.stderr.on("data", (d) => (log += d.toString()));
 
-console.log(`Starting vite dev server on ${url} …`);
-// `--host 127.0.0.1` matters: Vite's default is `localhost`, which on Windows
-// resolves to ::1 only, so a fetch to 127.0.0.1 gets connection-refused and the
-// server looks like it never started.
-const vite = spawn(
-  process.execPath,
-  [viteBin, "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
-  { cwd: webRoot, stdio: ["ignore", "pipe", "pipe"] },
-);
-
-let viteLog = "";
-vite.stdout.on("data", (d) => (viteLog += d.toString()));
-vite.stderr.on("data", (d) => (viteLog += d.toString()));
-
-async function waitForServer(timeoutMs = 60000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const r = await fetch(url);
-      if (r.ok) return true;
-    } catch {
-      /* not up yet */
+    const deadline = Date.now() + 60000;
+    let up = false;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null) break;
+      try {
+        if ((await fetch(base)).ok) {
+          up = true;
+          break;
+        }
+      } catch {
+        /* not listening yet */
+      }
+      await new Promise((r) => setTimeout(r, 300));
     }
-    await new Promise((r) => setTimeout(r, 400));
+
+    if (up) return { port, url: base, vite: child };
+
+    child.kill();
+    console.warn(`  (vite did not come up on ${port}; retrying — attempt ${attempt}/${attempts})`);
+    if (attempt === attempts) {
+      console.error("Vite failed to start. Last log:\n" + log);
+      process.exit(2);
+    }
   }
-  return false;
+  return null;
 }
 
-const ready = await waitForServer();
-if (!ready) {
-  console.error("Dev server did not start. Log:\n" + viteLog);
-  vite.kill();
-  process.exit(2);
-}
-console.log("Dev server ready.");
+const started = await startVite();
+if (!started) process.exit(2);
+const { url, vite } = started;
+console.log(`Dev server ready on ${url}`);
 
 // ── Drive it ────────────────────────────────────────────────────────────────
 

@@ -108,7 +108,7 @@ tool depends on.
 # R2 lifecycle rules (raw/ → IA at 30d, delete at 180d, abort stale multipart uploads)
 node scripts/set-r2-lifecycle.mjs --bucket custom-wayback --dry-run
 
-# Billing alert thresholds ($10 / $50 / $200). The hard spend cap is dashboard-only.
+# Billing alert thresholds ($10 /50 / $200). The hard spend cap is dashboard-only.
 node scripts/set-billing-alerts.mjs --dry-run
 ```
 
@@ -129,6 +129,47 @@ file with the same esbuild that `wrangler deploy` uses, so `.js` import specifie
 links resolve exactly as they do in production. The queue consumer is driven end to end against a
 fake D1/R2/Queues with a stubbed network, which is the only way to test the parts that matter —
 stage transitions, cursor resumption, and a 429 storm that no real run can schedule.
+
+> `turbo run typecheck` currently fails on `@custom-wayback/crawler-local` with
+> `TS2307: Cannot find module '@custom-wayback/shared'`. That is a pre-existing packaging bug in the
+> crawler, not a UI problem: `apps/crawler-local/src/politeness.ts` imports the package but
+> `apps/crawler-local/package.json` never declares it. The fix is to add
+> `"@custom-wayback/shared": "workspace:*"` to that file's `dependencies` and re-run
+> `pnpm install`. The `web` and `api` typechecks both pass.
+
+### UI verification
+
+A stylesheet can build green and style nothing. That is not hypothetical here — it is what
+happened: `index.css` declared its colour tokens in `@layer base`, Tailwind v4 never registered
+them, and every `bg-background`, `text-foreground`, `border-border` and sibling resolved to **no
+CSS rule at all**, across 246 usages. The build exited 0, the CSS gzipped to 12 KB, and the app
+rendered with no styling. These five scripts exist so that class of failure cannot recur silently:
+
+```powershell
+cd apps\web
+npx --no-install pnpm run build          # required first: the checks read dist/
+npx --no-install pnpm run verify:ui      # all five, in order
+```
+
+| Script | What it proves |
+|---|---|
+| `check:contrast` | Parses `src/styles/tokens.css` and asserts every foreground/background pair the app renders meets WCAG 2.1 AA (4.5:1 for text, 3:1 for UI, plus a border-visibility floor) in **both** themes. 52 checks. |
+| `check:css` | Derives the semantic utility classes from `src/`, then asserts each one is a real selector in the built CSS. Catches a token that stops being registered. |
+| `check:visual` | Loads the built stylesheet in Chromium and measures *resolved* colours, borders, focus rings and overlay opacity at 320 px, in both themes. Proves the rules actually apply. |
+| `test:e2e` | Drives the real `MonthCalendar` in a browser against a stubbed API — opens the popover, picks a month from the month grid, a year from the year grid, a day from the day grid, and selects with the keyboard. |
+| `check:mobile` | The same at 320 px, where the calendar renders as a bottom sheet: asserts the sheet is anchored to the bottom edge, spans the viewport, and keeps its day cells tappable. |
+
+The first three need only `dist/`; the last two start a Vite dev server on a free port and stub
+`/v1/**`. Screenshots and the generated fixture land in `apps/web/scripts/__screens__/`
+(git-ignored) and are the artefacts to eyeball when a check fails.
+
+**The token rule.** Semantic colours live in `src/styles/tokens.css` under `@theme`, as
+`light-dark(<light>, <dark>)` pairs. Adding a colour means adding a token there *and* a matching
+entry in `check:contrast`'s `CHECKS` list, or the audit will not cover it. Never use a raw Tailwind
+palette colour (`text-amber-300`) for app chrome: those are dark-theme-only values and they
+disappear against the light theme. Controls use the component classes defined in `src/index.css`
+(`cw-field`, `cw-btn`, `cw-panel`, `cw-overlay`, `cw-label`, `cw-segment`) rather than restating
+five utilities at every call site.
 
 ---
 
@@ -228,5 +269,4 @@ same line items the invoice does, computed from usage recorded as the work happe
 - Archived pages served in a `sandbox="allow-scripts allow-forms allow-popups"` iframe
 - Strict `Content-Security-Policy` on every served snapshot
 - `gitleaks` scans every commit; see `.gitleaks.toml`
-#   c u s t o m - w a y b a c k  
- 
+
