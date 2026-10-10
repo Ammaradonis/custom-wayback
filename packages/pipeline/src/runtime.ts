@@ -145,6 +145,20 @@ export const RUNTIME_SCRIPT = String.raw`
     var data = ev && ev.data;
     if (!data || data.__cw !== true) return;
     if (data.type === 'cw:ping') report('cw:pong', { href: location.href, title: document.title || '' });
+    if (data.type === 'cw:request-links') {
+      // Collect unique /a/ hrefs for SW prefetch, deduped, top 8.
+      var seen = {};
+      var links = [];
+      var anchors = document.querySelectorAll('a[href]');
+      for (var ai = 0; ai < anchors.length && links.length < 8; ai++) {
+        var href = anchors[ai].getAttribute('href') || '';
+        if (href.indexOf('/a/') === 0 && !seen[href]) {
+          seen[href] = true;
+          links.push(href);
+        }
+      }
+      if (links.length > 0) report('cw:links', { urls: links });
+    }
   });
 })();
 `;

@@ -125,7 +125,13 @@ manifestRouter.get("/manifest", async (c) => {
     ts: r.ts,
     title: null, // titles not stored in D1; available via the rewritten HTML
     bytes: null,
-    route: r.route ? `/a/${domain}/${r.day}/${r.route}` : `/a/${domain}/${r.day}/`,
+    // page_id is the path portion of the URL (e.g. "/products/phone").
+    // Build the viewer route by combining domain, day, and path — strip any
+    // leading slash from page_id first so we never produce a double-slash like
+    // "/a/example.com/2024-03-01//products/phone".
+    route: r.route
+      ? `/a/${domain}/${r.day}/${r.route.replace(/^\/+/, "")}`
+      : `/a/${domain}/${r.day}/`,
     resolvedDay: r.resolved_day,
     deltaDays: r.delta_days,
     stored: Boolean(r.stored),

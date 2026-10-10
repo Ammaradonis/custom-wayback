@@ -40,7 +40,7 @@ const ShareDialog = lazy(() =>
 
 interface CwMessage {
   __cw: true;
-  type: "cw:dead-request" | "cw:error" | "cw:navigate";
+  type: "cw:dead-request" | "cw:error" | "cw:navigate" | "cw:links";
   detail?: unknown;
 }
 
@@ -93,7 +93,7 @@ export default function ViewerPage() {
   const dayStripRef = useRef<HTMLDivElement>(null);
 
   const [currentRoute, setCurrentRoute] = useState(`/a/${domain}/${day}/${wildcard}`);
-  const [navStack, setNavStack] = useState<string[]>([]);
+  const [navStack, setNavStack] = useState<string[]>([`/a/${domain}/${day}/${wildcard}`]);
   const [deadCount, setDeadCount] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
@@ -102,6 +102,28 @@ export default function ViewerPage() {
   const [source, setSource] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
+
+  // Keep currentRoute in sync when React Router params change (e.g. day-strip click
+  // triggers a navigate() which remounts with new params).
+  useEffect(() => {
+    const route = `/a/${domain}/${day}/${wildcard}`;
+    setCurrentRoute(route);
+    setNavStack((s) => {
+      // Avoid duplicating the same route at the top of the stack.
+      if (s[s.length - 1] === route) return s;
+      return [...s, route];
+    });
+    setLoading(true);
+    // Fetch toolbar headers for the new route so the resolved-day badge and
+    // source indicator update correctly. This is a HEAD request — no body, cheap.
+    void fetch(route, { method: "HEAD" }).then((r) => {
+      setResolvedDay(r.headers.get("X-Wayback-Resolved-Day"));
+      const dd = r.headers.get("X-Wayback-Delta-Days");
+      setDeltaDays(dd ? parseInt(dd, 10) : null);
+      setSource(r.headers.get("X-Custom-Wayback-Source"));
+    }).catch(() => void 0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [domain, day, wildcard]);
 
   // Derive month from day.
   const month = day.slice(0, 7);
@@ -132,12 +154,35 @@ export default function ViewerPage() {
         });
       } else if (msg.type === "cw:navigate") {
         const url = (msg.detail as { url?: string })?.url;
-        if (url) navigate(url);
+        if (url && url.startsWith("/a/")) {
+          // navigate() keeps React Router in sync; goRoute updates our local
+          // state (nav stack, loading flag).
+          const m = /^\/a\/[^/]+\/(\d{4}-\d{2}-\d{2})/.exec(url);
+          goRoute(m?.[1] ?? day, url, true);
+        }
+      } else if (msg.type === "cw:links") {
+        // Runtime sent back its top in-site links for SW prefetch.
+        const links = (msg.detail as { urls?: string[] })?.urls;
+        if (
+          Array.isArray(links) &&
+          links.length > 0 &&
+          "serviceWorker" in navigator &&
+          navigator.serviceWorker.controller
+        ) {
+          navigator.serviceWorker.controller.postMessage({
+            type: "PREFETCH",
+            urls: links.slice(0, 8),
+          });
+        }
       }
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [navigate, showToast]);
+  // goRoute is defined in the same render scope; including it would cause
+  // the listener to be re-registered on every render. It reads only stable
+  // refs (navigate, setNavStack) so the stale-closure risk is negligible.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigate, showToast, day]);
 
   // Scroll active day into view in the day strip.
   useEffect(() => {
@@ -151,17 +196,10 @@ export default function ViewerPage() {
     setLoading(true);
     setCurrentRoute(route);
     if (push) setNavStack((s) => [...s, route]);
-    // Update the URL bar without a full React navigation (keeps the iframe mount).
-    const newPath = route;
-    window.history.replaceState(null, "", newPath);
-    if (iframeRef.current) iframeRef.current.src = route;
-    // Peek headers for source/resolved-day info.
-    void fetch(route, { method: "HEAD" }).then((r) => {
-      setResolvedDay(r.headers.get("X-Wayback-Resolved-Day"));
-      const dd = r.headers.get("X-Wayback-Delta-Days");
-      setDeltaDays(dd ? parseInt(dd, 10) : null);
-      setSource(r.headers.get("X-Custom-Wayback-Source"));
-    }).catch(() => void 0);
+    // Navigate via React Router so the address bar, history stack and component
+    // URL state stay in sync. Do NOT also call window.history.replaceState — that
+    // desynchronises React Router's internal history and breaks the back button.
+    navigate(route, { replace: !push });
   }
 
   function handleDayClick(targetDay: string) {
@@ -373,44 +411,20 @@ export default function ViewerPage() {
           className="absolute inset-0 w-full h-full border-0 bg-white"
           onLoad={() => {
             setLoading(false);
-            // Wire in-iframe link clicks so day-strip stays in sync,
-            // then prefetch the top 8 same-mirror links via the service worker.
-            try {
-              const doc = iframeRef.current?.contentDocument;
-              if (!doc) return;
-
-              // Click intercept for /a/ links.
-              doc.addEventListener("click", (e: MouseEvent) => {
-                const a = (e.target as Element)?.closest?.("a[href]");
-                if (!a) return;
-                const href = a.getAttribute("href") ?? "";
-                if (!href.startsWith("/a/")) return;
-                e.preventDefault();
-                const m = /^\/a\/[^/]+\/(\d{4}-\d{2}-\d{2})/.exec(href);
-                const targetDay = m ? m[1]! : day;
-                navigate(href);
-                goRoute(targetDay, href, true);
-              }, true);
-
-              // SW prefetch: collect unique /a/ hrefs from the page, take top 8.
-              const links = Array.from(doc.querySelectorAll<HTMLAnchorElement>("a[href^='/a/']"))
-                .map((a) => a.href)
-                .filter((href, i, arr) => arr.indexOf(href) === i)
-                .slice(0, 8);
-
-              if (
-                links.length > 0 &&
-                "serviceWorker" in navigator &&
-                navigator.serviceWorker.controller
-              ) {
-                navigator.serviceWorker.controller.postMessage({
-                  type: "PREFETCH",
-                  urls: links,
-                });
-              }
-            } catch {
-              // Cross-origin iframe: click intercept silently fails;
-              // links work natively. Prefetch not possible cross-origin.
+            // The iframe is sandboxed without allow-same-origin, so
+            // contentDocument is always null. Link interception and prefetch are
+            // handled by the runtime script injected at ingest/on-demand time,
+            // which uses postMessage to communicate back (cw:navigate, cw:dead-request).
+            // Ask the runtime to send back the top in-site links for SW prefetch.
+            if (
+              "serviceWorker" in navigator &&
+              navigator.serviceWorker.controller &&
+              iframeRef.current?.contentWindow
+            ) {
+              iframeRef.current.contentWindow.postMessage(
+                { __cw: true, type: "cw:request-links" },
+                "*",
+              );
             }
           }}
         />

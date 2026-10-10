@@ -71,7 +71,7 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
 
   // 3. If content already purged, do an on-demand id_ fetch.
   if (snap.purged_at !== null || !snap.r2_key) {
-    return fetchOnDemand(domain, day, path, snap.ts, c.env);
+    return fetchOnDemand(domain, day, path, snap.ts, c.env, snap.resolved_day, snap.delta_days);
   }
 
   // 4. Try Workers Cache API → R2.
@@ -91,7 +91,7 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
   }
 
   // 5. Full cache miss — on-demand fetch.
-  return fetchOnDemand(domain, day, path, snap.ts, c.env);
+  return fetchOnDemand(domain, day, path, snap.ts, c.env, snap.resolved_day, snap.delta_days);
 });
 
 // ── On-demand id_ fetch ───────────────────────────────────────────────────────
@@ -168,6 +168,8 @@ export async function fetchOnDemand(
   path: string,
   ts: string,
   env: Env,
+  resolvedDay?: string | null,
+  deltaDays?: number | null,
 ): Promise<Response> {
   const originalUrl = `https://${domain}${path}`;
   const rawUrl = `${WAYBACK_RAW_BASE}/${ts}id_/${originalUrl}`;
@@ -281,7 +283,13 @@ export async function fetchOnDemand(
     "X-Custom-Wayback-Source": "on-demand",
     "X-Robots-Tag": HEAD_CONTRACT.robotsContent,
   });
-  return new Response(rewritten.body, { status: 200, headers });
+  const response = new Response(rewritten.body, { status: 200, headers });
+  // Nearest-capture badge: same headers the R2 path attaches via
+  // injectToolbarHeaders, so the ViewerPage shell sees them regardless of which
+  // plane served the page.
+  if (resolvedDay) headers.set("X-Wayback-Resolved-Day", resolvedDay);
+  if (deltaDays !== null && deltaDays !== undefined) headers.set("X-Wayback-Delta-Days", String(deltaDays));
+  return response;
 }
 
 // ── Toolbar headers ───────────────────────────────────────────────────────────
