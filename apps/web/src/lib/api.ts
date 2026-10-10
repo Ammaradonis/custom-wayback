@@ -79,12 +79,6 @@ async function request<T>(
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
 
-  if (resp.status === 401) {
-    clearToken();
-    window.location.href = "/login";
-    throw new Error("Unauthorized");
-  }
-
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ error: resp.statusText })) as {
       error?: string;
@@ -95,6 +89,16 @@ async function request<T>(
       options?.preferMessage === true && typeof err.message === "string" && err.message.length > 0
         ? err.message
         : fallback;
+
+    // Only redirect to /login and clear the token for 401s that happen on
+    // authenticated routes — not on login/register itself. Clearing the token
+    // on a login failure redirects the user away from the login form, hides the
+    // real error ("Invalid credentials"), and shows "Unauthorized" instead.
+    if (resp.status === 401 && !path.startsWith("/auth/")) {
+      clearToken();
+      window.location.href = "/login";
+    }
+
     throw new ApiError(message, resp.status, err);
   }
 
@@ -131,9 +135,9 @@ function qs(params: object): string {
 
 export const auth = {
   register: (email: string, password: string) =>
-    request<{ ok: boolean }>("POST", "/auth/register", { email, password }),
+    request<{ ok: boolean }>("POST", "/auth/register", { email, password }, { preferMessage: true }),
   login: (email: string, password: string) =>
-    request<{ token: string }>("POST", "/auth/login", { email, password }),
+    request<{ token: string }>("POST", "/auth/login", { email, password }, { preferMessage: true }),
   logout: () => request<{ ok: boolean }>("POST", "/auth/logout"),
   logoutAll: () => request<{ ok: boolean }>("POST", "/auth/logout-all"),
 };
