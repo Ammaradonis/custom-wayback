@@ -102,6 +102,50 @@ tool depends on.
 
 ---
 
+## Continuous deployment
+
+**Every push to `main` deploys, via Cloudflare Workers Builds** (the Git integration on the
+Worker itself) — not via GitHub Actions. There is no deploy job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml); CI's last gate is the test suite. The
+reason is credential scope: Workers Builds authenticates with its own token, so the deploy no
+longer depends on a hand-made `CLOUDFLARE_API_TOKEN` carrying exactly the right scopes. That
+token was the single thing that kept the old deploy job red.
+
+Because the Worker's config is not at the repo root, and `[assets] directory = "../web/dist"`
+resolves relative to `wrangler.toml`, Workers Builds must be pointed at the API directory:
+
+| Setting (**Settings → Build**) | Value |
+|---|---|
+| Root directory | `apps/api` |
+| Build command | `cd ../.. && pnpm install --frozen-lockfile && pnpm turbo run build --filter=@custom-wayback/api...` |
+| Deploy command | `npx wrangler deploy` |
+| Build variable | `NODE_VERSION` = `22` (the floor is 22.6 — see the pitfalls note below) |
+| Build variable | `PNPM_VERSION` = `9.14.4` (image default is 10.x; the repo is pinned to 9) |
+
+Two traps worth knowing before the first build:
+
+- **The build command must build the web app too**, not just the API. `--filter=@custom-wayback/api...`
+  builds the API's workspace dependencies (`packages/shared`, `packages/pipeline`); the web
+  `dist/` that the `[assets]` binding serves is a dependency of *the root* package, so the filter
+  covers it. Drop that filter and the deploy uploads a stale site.
+- **The auto-generated build token cannot run D1 migrations.** Workers Builds' default token
+  grants Workers Scripts/KV/R2 edit and Workers Routes edit, but **no D1**. `wrangler d1
+  migrations apply --remote` therefore fails in a build. Either select a custom API token with
+  **D1 → Edit** for the build, or apply migrations as a separate deliberate step before merging
+  a schema-changing PR:
+  `cd apps/api && pnpm exec wrangler d1 migrations apply custom-wayback-ledger --remote`.
+
+The pipeline that was verified end to end: the Worker is live at
+`https://custom-wayback-api.ammar-webalchemist.workers.dev`, and `GET /v1/health` reports
+`{"ok":true,"checks":{"d1":true,"r2":true,"queue":true,"secrets":true}}`.
+
+> Node 24 is the Workers Builds image default. `NODE_VERSION = 22` is set deliberately: the
+> crawler's test scripts use `--experimental-sqlite`, which was removed in Node 24, so pinning
+> 22 keeps the build toolchain identical to CI and to local development. Don't add `turbo run
+> test` to the Workers Builds build command while that pin is a version the flags still exist on.
+
+---
+
 ## Deployment scripts
 
 ```powershell
