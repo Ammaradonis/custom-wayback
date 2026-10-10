@@ -60,6 +60,7 @@ import {
   d1PendingCountSql,
   d1ReadParams,
   d1ReadSql,
+  MORE_FIELD,
   diffAgainstD1,
   toPostgrestRow,
   WATERMARK_FIELD,
@@ -200,6 +201,15 @@ export class BackupSync {
   private readonly config: SupabaseConfig;
   private readonly env: BackupRuntimeEnv;
   private readonly now: () => number;
+  /**
+   * Run options, including the injected `fetchImpl` and clock.
+   *
+   * Held on the instance because the syncer issues requests in several places —
+   * the mirror's `backup_state` reads and writes as well as the row pushes — and
+   * they must all use the same transport. `run()` replaces this with the options
+   * it was called with, so a later call can narrow or widen the injection.
+   */
+  private options: SyncOptions;
 
   constructor(env: BackupRuntimeEnv, options: SyncOptions = {}) {
     const resolved = resolveBackupEnv(env);
@@ -207,6 +217,7 @@ export class BackupSync {
     this.config = resolved.config;
     this.db = env.DB;
     this.now = options.now ?? (() => Math.floor(Date.now() / 1000));
+    this.options = options;
   }
 
   get schema(): string {
@@ -229,8 +240,6 @@ export class BackupSync {
     headers[profile === "read" ? "Accept-Profile" : "Content-Profile"] = this.config.schema;
     return headers;
   }
-
-  private options: SyncOptions = {};
 
   /**
    * The fetch used for the syncer's own calls to `backup_state`.
@@ -419,24 +428,32 @@ export class BackupSync {
    * copies planned columns only, so the value that becomes the next cursor is
    * available without ever being sent to PostgREST.
    *
-   * `d1ReadParams` and not a bare `bind(cursor)`: the window form declares the
-   * cursor **twice** — as the projected `__wm` and inside `MIN(…) OVER ()` — and
-   * binding it once leaves the second placeholder NULL. `wm >= NULL` is NULL for
-   * every row, so the table would sync nothing while every run reported success.
+   * `d1ReadParams` and not a bare `bind(cursor)`: the value to supply is derived
+   * from the generated SQL rather than assumed. Today that is exactly one cursor,
+   * and a future edit that moves the placeholder into the projection would need two
+   * — a mismatch that is otherwise silent, because `wm >= NULL` matches no rows and
+   * the table would simply never sync while every run reported success.
    */
   private async readBatch(
     plan: TablePlan,
     cursor: string,
     limit: number,
-  ): Promise<{ rows: BackupRow[]; watermark: string | number | null }> {
+  ): Promise<{ rows: BackupRow[]; watermark: string | number | null; more: boolean }> {
     const res = await this.db
       .prepare(d1ReadSql(plan, limit))
       .bind(...d1ReadParams(plan, cursor))
       .all<BackupRow>();
     const raw = res.results ?? [];
     const last = raw[raw.length - 1];
-    const watermark = (last?.[WATERMARK_FIELD] ?? null) as string | number | null;
-    return { rows: raw.map((row) => toPostgrestRow(plan, row)), watermark };
+    return {
+      rows: raw.map((row) => toPostgrestRow(plan, row)),
+      watermark: (last?.[WATERMARK_FIELD] ?? null) as string | number | null,
+      // `__more` is null exactly when the batch reached the end of the pending set.
+      // A row count cannot answer this: a batch that contains everything and a batch
+      // that was capped at `limit` are the same size, and treating the capped one as
+      // the end would leave the cursor behind and re-read it forever.
+      more: raw.length > 0 && last?.[MORE_FIELD] != null,
+    };
   }
 
   /** Compare cursors as numbers when they look numeric, as strings otherwise. */
@@ -629,7 +646,6 @@ export class BackupSync {
     }
 
     await this.recordRunStart();
-    this.options = options;
 
     for (const plan of plans) {
       if (Date.now() > deadline) {
@@ -673,7 +689,7 @@ export class BackupSync {
       for (let page = 0; page < BACKUP_DEFAULTS.maxPagesPerTable; page++) {
         if (Date.now() > deadline) break;
 
-        const { rows, watermark } = await this.readBatch(plan, current, readBatch);
+        const { rows, watermark, more } = await this.readBatch(plan, current, readBatch);
         if (rows.length === 0) break;
 
         if (watermark === null) {
@@ -689,7 +705,14 @@ export class BackupSync {
 
         let pushed = 0;
         for (const batch of batches) {
-          const push = await pushRows(this.config, plan.name, batch, conflictTarget(plan), options);
+          // The transport is passed explicitly rather than left to the spread:
+          // every request the syncer makes must go through the same injected
+          // `fetchImpl`, and a push that quietly fell back to the platform `fetch`
+          // would be the one call a test could not intercept.
+          const push = await pushRows(this.config, plan.name, batch, conflictTarget(plan), {
+            ...options,
+            fetchImpl: this.httpFetch(),
+          });
           if (!push.ok) {
             result.error = push.error ?? `push failed with HTTP ${push.status}`;
             // Commit what the mirror did accept, then stop. On the next run the
@@ -712,7 +735,10 @@ export class BackupSync {
         current = String(watermark);
         await this.writeState(plan.name, { cursor: current, rows: pushed }, this.now());
 
-        if (rows.length < readBatch) break;
+        // `__more` is the statement's own answer to "was that the whole table?", so
+        // the run stops only when D1 says there is nothing left — never on a guess
+        // from the row count.
+        if (!more) break;
       }
 
       result.ms = Date.now() - started;
@@ -766,7 +792,6 @@ export class BackupSync {
    * the run started.
    */
   async status(options: SyncOptions = {}): Promise<BackupStatus> {
-    this.options = options;
     const now = this.now();
     const enabled = backupEnabled(this.env);
 

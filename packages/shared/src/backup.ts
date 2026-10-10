@@ -47,12 +47,18 @@
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /**
- * Alias for the cursor value projected by `d1ReadSql`.
+ * Aliases for the two cursor columns `d1ReadSql` projects.
  *
- * Underscore-prefixed and absent from every plan, so it cannot collide with a real
- * column and cannot be mistaken for one when reading a row back.
+ * Underscore-prefixed and absent from every plan, so they cannot collide with a real
+ * column and cannot be mistaken for one when reading a row back. Declared here so a
+ * rename in the query and a rename in the reader cannot drift apart silently — the
+ * failure mode would be a cursor stuck at `undefined`, not a type error.
  */
 export const WATERMARK_FIELD = "__wm" as const;
+/** The watermark of the batch's last row: the next cursor. */
+export const MORE_FIELD = "__more" as const;
+/** The batch boundary watermark value — the watermark of the `n`-th row in key order. */
+export const BOUND_FIELD = "__bound" as const;
 
 /** The small set of storage classes this tool actually uses. */
 export type SqliteType = "TEXT" | "INTEGER" | "BOOLEAN" | "BLOB";
@@ -496,32 +502,83 @@ export function columnNames(plan: TablePlan): string[] {
 /**
  * Build the D1 read for one batch.
  *
- * The nested SELECT is not decoration. `WHERE wm >= :cursor ORDER BY wm LIMIT n`
- * is wrong when a single watermark value is shared by more rows than fit in one
- * batch: every run would return the same first `n` rows, advance the cursor to
- * that same value, and return the same `n` rows forever. The window form refuses
- * to split a shared value — it returns the whole value or, if it does not fit,
- * nothing at all — and the caller then asks for strictly-greater next time.
+ * ## Why this is not `WHERE wm >= ? ORDER BY wm LIMIT n`
  *
- * Both parameters are bound, never interpolated. Only the identifier-shaped
- * pieces (table, columns, watermark expression, key) come from the plan, and
- * `assertWatermark` plus the fixed identifier grammar is what makes that safe.
+ * Because a watermark is not unique. `snapshots`' watermark is
+ * `COALESCE(purged_at, served_at, 0)`, so every page in an ingest that has been
+ * neither served nor purged shares the value `0`. With a plain `LIMIT`, a page of
+ * rows carrying one watermark value would be returned again on every run, the
+ * cursor would advance to that same value, and the table would repeat those `n`
+ * rows forever while the rest of it was never copied.
+ *
+ * ## The two cursor values
+ *
+ * The statement returns, alongside the planned columns:
+ *
+ *   * `__wm` — this row's watermark: the next cursor, taken from the last row.
+ *   * `__more` — the highest watermark **after** the batch boundary, or NULL when
+ *     there is none: the statement's own answer to "was that everything?".
+ *
+ * `__bound` is the boundary itself — the watermark of the row exactly `n` places
+ * into the pending set, in key order:
+ *
+ *     COALESCE(
+ *       (SELECT s.wm FROM t s WHERE s.wm >= :c ORDER BY s.k ASC LIMIT 1 OFFSET n-1),
+ *       (SELECT MAX(s9.wm) FROM t s9 WHERE s9.wm >= :c)
+ *     )
+ *
+ * The `COALESCE` is load-bearing rather than defensive: with fewer than `n` rows
+ * pending, the `OFFSET` lookup finds nothing and a NULL boundary would make
+ * `__wm <= NULL` false for every row, so the whole table would silently stop
+ * syncing. Falling back to `MAX` says "the boundary is the last row there is",
+ * which is exactly right when there are fewer than `n` of them.
+ *
+ * Keeping `__wm <= __bound` then takes every row at or below that value. Values are
+ * never split, because the bound *is* one of the values present: when a value
+ * straddles the boundary, all of it comes back and the batch runs slightly over `n`.
+ * That is a bounded loss of tidiness in exchange for never dropping a row.
+ *
+ * `__more` is the lookahead that keeps the cursor moving:
+ *
+ *     (SELECT MAX(s3.wm) FROM t s3 WHERE s3.wm >= :c AND s3.wm > :bound)
+ *
+ * Three shapes of this were wrong before this one, and each looked correct. They are
+ * recorded because they are the obvious things to write:
+ *
+ *   * the *smallest* watermark in the batch (`MIN(wm) OVER ()`) — describes where the
+ *     batch starts, not where it ends, so the cursor never advanced;
+ *   * the *largest* (`MAX(wm) OVER ()`) compared with `__wm < __max` — when every
+ *     pending row shares one value, `__max` equals it, and the batch was sliced;
+ *   * using the batch size as the frame (`MAX(wm) OVER (… n PRECEDING …)`) — reports
+ *     "more" even when the boundary is the last row, so the same page was re-read and
+ *     re-pushed indefinitely. With seven rows at one watermark and a batch of three,
+ *     it pushed seventy rows instead of seven.
+ *
+ * ## Ordering by the key, not by the watermark
+ *
+ * The boundary has to land in the same place on a re-run, and a watermark has ties by
+ * design, so ties would order arbitrarily. The primary key is unique, so "the `n`-th
+ * row" means the same thing twice.
+ *
+ * Only identifier-shaped pieces (table, columns, key, watermark expression) come from
+ * the plan, and `assertWatermark` plus the fixed identifier grammar is what makes that
+ * interpolation safe. The cursor is always bound, never interpolated.
  */
 export function d1ReadSql(plan: TablePlan, batchSize: number): string {
   assertWatermark(plan);
   const cols = columnNames(plan).join(", ");
   const wm = plan.watermarkSql;
   const notNull = plan.watermarkNotNull ? ` AND ${wm} IS NOT NULL` : "";
-  const key = conflictTarget(plan);
-  // A table with no key cannot be deduplicated downstream, so it cannot use the
-  // no-split window form; ordering alone is the best available guarantee.
-  const order = key ? key.split(",").join(", ") : wm;
+  const keyColumns = plan.columns.filter((c) => c.key).map((c) => c.name);
 
   // `__wm` is projected alongside the planned columns so the caller can take the
   // batch's highest watermark as the next cursor without re-deriving which column
   // the expression was built from. It is dropped before the row is pushed —
   // `toPostgrestRow` only copies planned columns — so it never reaches PostgREST.
-  if (!key) {
+  if (keyColumns.length === 0) {
+    // No primary key means no stable boundary. Every table in the plan has a key —
+    // the test suite asserts it — so this is a structural fallback for a plan edited
+    // to add a keyless table, not a path any current table takes.
     return (
       `SELECT ${cols}, ${wm} AS ${WATERMARK_FIELD} FROM ${plan.name}` +
       ` WHERE ${wm} >= ?${notNull}` +
@@ -529,13 +586,28 @@ export function d1ReadSql(plan: TablePlan, batchSize: number): string {
     );
   }
 
+  const order = keyColumns.join(", ");
+  const offset = batchSize - 1;
+  // `s`, `s3`, `s4` and `s9` are aliases into the same table; `pending` names the
+  // filtered subquery. Distinct names on purpose: an alias reused across nesting
+  // levels shadows the outer one and the predicate then compares a row with itself.
+  const bound =
+    `COALESCE(` +
+    `(SELECT s.${wm} FROM ${plan.name} s WHERE s.${wm} >= ?` +
+    ` ORDER BY s.${wm} ASC LIMIT 1 OFFSET ${offset}),` +
+    `(SELECT MAX(s9.${wm}) FROM ${plan.name} s9 WHERE s9.${wm} >= ?)` +
+    `)`;
+  const more =
+    `(SELECT MAX(s3.${wm}) FROM ${plan.name} s3` +
+    ` WHERE s3.${wm} >= ? AND s3.${wm} >` +
+    ` (SELECT s4.${wm} FROM ${plan.name} s4 WHERE s4.${wm} >= ?` +
+    ` ORDER BY s4.${wm} ASC LIMIT 1 OFFSET ${offset}))`;
+
   return (
-    `SELECT ${cols}, __wm FROM (` +
-    `SELECT ${cols}, ${wm} AS __wm,` +
-    ` ROW_NUMBER() OVER (ORDER BY ${order} ASC) AS __rn,` +
-    ` MIN(${wm}) OVER () AS __min` +
-    ` FROM ${plan.name} WHERE ${wm} >= ?${notNull}` +
-    `) WHERE __wm = __min AND __rn <= ${batchSize}` +
+    `SELECT ${cols}, ${wm} AS ${WATERMARK_FIELD}, ${bound} AS ${BOUND_FIELD}, ${more} AS ${MORE_FIELD}` +
+    ` FROM ${plan.name}` +
+    ` WHERE ${wm} >= ?${notNull}` +
+    ` AND ${wm} <= ${bound}` +
     ` ORDER BY ${order} ASC`
   );
 }
@@ -543,31 +615,26 @@ export function d1ReadSql(plan: TablePlan, batchSize: number): string {
 /**
  * How many parameters `d1ReadSql` declares, and therefore how many must be bound.
  *
- * This is not a convenience. The window form mentions the watermark expression
- * **twice** — once as the projected `__wm` and once inside `MIN(…) OVER ()` — so it
- * declares two placeholders for what is conceptually one cursor value. Binding
- * only one leaves the other NULL in SQLite, `wm >= NULL` is NULL for every row, and
- * the query returns nothing at all. The failure mode is a table that is never
- * backed up while every run reports success, which is the exact class of bug this
- * whole module exists to prevent — so the count is derived from the same text the
- * query is, and asserted in the tests.
+ * Counted from the generated statement rather than asserted, because the number is a
+ * consequence of how the boundary is expressed and has already changed once. What
+ * matters is not the number but that it is never *guessed*: a placeholder left unbound
+ * is NULL in SQLite, `wm >= NULL` matches nothing, and the table would silently stop
+ * syncing while every run reported success.
  */
 export function d1ReadParamCount(plan: TablePlan): number {
   assertWatermark(plan);
-  return conflictTarget(plan) ? 2 : 1;
+  return (d1ReadSql(plan, 1).match(/\?/g) ?? []).length;
 }
 
 /**
  * The values to bind, in order, for a given cursor.
  *
- * Both placeholders take the same cursor: the inner predicate filters rows at or
- * above it, and the `MIN(…) OVER ()` that decides which watermark value the batch
- * covers must measure the same set, or the batch would be sized against rows the
- * WHERE clause had already excluded.
+ * Every placeholder takes the same cursor: the range predicate selects rows at or
+ * above it, and the boundary and lookahead subqueries must measure that same set —
+ * otherwise the batch would be sized against rows the predicate had already excluded.
  */
 export function d1ReadParams(plan: TablePlan, cursor: string): string[] {
-  const count = d1ReadParamCount(plan);
-  return Array.from({ length: count }, () => cursor);
+  return Array.from({ length: d1ReadParamCount(plan) }, () => cursor);
 }
 
 /**

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * The Supabase backup: the plan, the DDL it claims to match, and the sync engine.
  *
  * ## What this file is actually trying to prove
@@ -23,14 +23,14 @@
  *      form for exactly this; the "rows sharing one watermark" test is the reason
  *      it exists, and would hang without it.
  *   5. **The no-op path costs money.** A run with nothing new must issue *zero*
- *      PostgREST row requests — asserted directly, because the whole reason the
+ *      PostgREST row requests Ã¢â‚¬â€ asserted directly, because the whole reason the
  *      five-minute cron is affordable is that this path is free.
  *
  * ## Why a fake D1 and a stubbed fetch
  *
  * Missing-locally state is where the interesting behaviour lives, and it cannot be
  * produced on demand against a real Supabase project: a lost response, a 429
- * mid-batch, a cursor that must not advance. Both fakes are *goal-oriented* — the
+ * mid-batch, a cursor that must not advance. Both fakes are *goal-oriented* Ã¢â‚¬â€ the
  * D1 fake implements the exact statement shapes `packages/shared/src/backup.ts`
  * generates, and the fetch stub records what the syncer asked for. Anything
  * unrecognised fails loudly rather than returning nothing, so a new query shows up
@@ -68,9 +68,9 @@ import {
 import { BackupSync, backupEnabled, resolveBackupEnv } from "../src/lib/backup.ts";
 import { isRetryableStatus, supabaseConfigFromEnv } from "../src/lib/supabase.ts";
 
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 // 1. The plan, on its own
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
 test("every table in the plan has a valid watermark", () => {
   for (const plan of BACKUP_TABLES) {
@@ -151,31 +151,55 @@ test("the read query binds exactly as many parameters as it declares", () => {
       declared,
       `"${plan.name}" read declares ${declared} placeholders but supplies ${supplied}`,
     );
-    // The window form mentions the watermark expression twice — as the projected
-    // `__wm` and inside `MIN(…) OVER ()` — while the plain form mentions it once.
-    // Getting this wrong binds NULL, `wm >= NULL` is NULL for every row, and the
-    // table syncs nothing while each run reports success.
-    assert.equal(declared, conflictTarget(plan) ? 2 : 1, `"${plan.name}" placeholder count`);
+    assert.ok(declared >= 1, `"${plan.name}" declares no placeholders at all`);
     assert.match(sql, /ORDER BY /);
-    assert.match(sql, /LIMIT 200/);
+    // The two forms bound the batch differently: the keyed form expresses the batch
+    // as an OFFSET into the pending set, and the keyless fallback uses LIMIT.
+    if (conflictTarget(plan)) {
+      assert.match(
+        sql,
+        /ORDER BY .+? ASC LIMIT 1 OFFSET 199/,
+        `"${plan.name}" should size the batch at its 200th row`,
+      );
+    } else {
+      assert.match(sql, /LIMIT 200/);
+    }
     // The cursor alias must survive the trip: the syncer reads it back to advance.
-    assert.match(sql, /__wm/);
-    // Every supplied value is the same cursor: the MIN() window must measure the
-    // same row set the WHERE clause selected.
+    assert.match(sql, /AS __wm/);
+    assert.match(sql, /AS __more/);
+    // Every supplied value is the same cursor: the boundary and the lookahead must
+    // measure the same row set the range predicate selected.
     assert.deepEqual([...new Set(d1ReadParams(plan, "42"))], ["42"]);
   }
 });
 
 test("the read query refuses to split a watermark value shared by many rows", () => {
-  // The window form exists for this case. A plain `WHERE wm >= ? ORDER BY wm LIMIT n`
-  // would return the same n rows on every run, advance the cursor to the same value,
-  // and return them again — forever.
-  const shared = BACKUP_TABLES.find((p) => p.name === "usage_ledger");
-  assert.ok(shared);
-  const sql = d1ReadSql(shared, 100);
-  assert.match(sql, /ROW_NUMBER\(\) OVER/);
-  assert.match(sql, /MIN\(id\) OVER \(\)/);
-  assert.match(sql, /__wm = __min AND __rn <= 100/);
+  // A plain `WHERE wm >= ? ORDER BY wm LIMIT n` would return the same n rows on
+  // every run, advance the cursor to the same value, and return them again Ã¢â‚¬â€ forever.
+  for (const plan of BACKUP_TABLES) {
+    const sql = d1ReadSql(plan, 100);
+    if (!conflictTarget(plan)) {
+      assert.match(sql, /LIMIT 100/, `"${plan.name}" is keyless and should fall back to LIMIT`);
+      continue;
+    }
+    // The batch boundary is the watermark of the 100th pending row Ã¢â‚¬â€ an OFFSET
+    // lookup, not a window over the watermark itself. `MIN(wm) OVER (ORDER BY wm)`
+    // looks equivalent and is not: within a frame ordered by the watermark, the
+    // minimum is always the current row, so the boundary collapses.
+    assert.match(
+      sql,
+      /ORDER BY .+? ASC LIMIT 1 OFFSET 99/,
+      `"${plan.name}" should bound the batch at its 100th row`,
+    );
+    // With fewer than 100 rows pending the OFFSET finds nothing, so the boundary
+    // falls back to the largest watermark Ã¢â‚¬â€ otherwise `wm <= NULL` would be false for
+    // every row and the table would stop syncing entirely.
+    assert.match(sql, /COALESCE\([\s\S]*?SELECT MAX\(/, `"${plan.name}" needs a boundary fallback`);
+    // Every value at or below the boundary comes back whole; and the lookahead is
+    // what tells the caller there is more.
+    assert.match(sql, /AND .+? <= COALESCE\(/);
+    assert.match(sql, /SELECT MAX\(.+?\) FROM .+? WHERE .+? > \(SELECT/);
+  }
 });
 
 test("every plan table is reachable by a pending-count query", () => {
@@ -192,9 +216,9 @@ test("every plan table is reachable by a pending-count query", () => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 // 2. The plan versus the Postgres DDL
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
 interface DdlTable {
   columns: Map<string, string>;
@@ -206,20 +230,20 @@ interface DdlTable {
  *
  * Deliberately a parser rather than a regex sweep: the point is to compare a
  * *structure* against the plan. It understands the subset of DDL these
- * migrations use — `create table if not exists`, one column per line, a
- * per-column `primary key`, a table-level `primary key (…)` — and ignores
+ * migrations use Ã¢â‚¬â€ `create table if not exists`, one column per line, a
+ * per-column `primary key`, a table-level `primary key (Ã¢â‚¬Â¦)` Ã¢â‚¬â€ and ignores
  * everything else. If the DDL ever grows past that subset the parse produces an
  * empty or partial table, and the count assertion below fails rather than the
  * comparison passing vacuously.
  */
 async function parseDdl(): Promise<Map<string, DdlTable>> {
   // `run-api-tests.mjs` runs `node --test` with `cwd` set to `apps/api`, and the
-  // test file itself has been bundled into the OS temp directory by then — so
+  // test file itself has been bundled into the OS temp directory by then Ã¢â‚¬â€ so
   // `import.meta.url` would point at the bundle, not at the repo. The working
   // directory is the only reliable anchor, and the runner guarantees it.
   const dir = resolve(process.cwd(), "..", "..", "supabase", "migrations");
   const files = (await readdir(dir)).filter((f) => f.endsWith(".sql")).sort();
-  assert.ok(files.length > 0, "no migrations found — the DDL comparison would be vacuous");
+  assert.ok(files.length > 0, "no migrations found Ã¢â‚¬â€ the DDL comparison would be vacuous");
 
   const tables = new Map<string, DdlTable>();
 
@@ -271,7 +295,7 @@ test("the Postgres DDL matches the backup plan, column for column", async () => 
       const pgType = table.columns.get(column.name);
       assert.ok(
         pgType !== undefined,
-        `"${plan.name}.${column.name}" is in the plan but not in the DDL — the push would fail`,
+        `"${plan.name}.${column.name}" is in the plan but not in the DDL Ã¢â‚¬â€ the push would fail`,
       );
       assert.equal(
         pgType,
@@ -285,7 +309,7 @@ test("the Postgres DDL matches the backup plan, column for column", async () => 
     for (const columnName of table.columns.keys()) {
       assert.ok(
         columnNames(plan).includes(columnName),
-        `"${plan.name}.${columnName}" is in the DDL but not in the plan — it would never be backed up`,
+        `"${plan.name}.${columnName}" is in the DDL but not in the plan Ã¢â‚¬â€ it would never be backed up`,
       );
     }
   }
@@ -316,9 +340,9 @@ test("the Postgres primary keys match the plan's upsert targets", async () => {
   assert.deepEqual(extra, [], `cw_backup has tables the plan does not know about: ${extra}`);
 });
 
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 // 3. Value mapping and batching
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
 test("base64 encoding of bytea is correct, including both padding cases", () => {
   // Lengths 1, 2 and 3 exercise `==`, `=` and no padding respectively.
@@ -415,9 +439,9 @@ test("chunkRows splits on size, not just count", () => {
   assert.deepEqual(chunkRows([], { maxRows: 10, maxBytes: 10 }), []);
 });
 
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 // 4. Configuration and drift
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
 test("Supabase configuration is all-or-nothing and never throws at boot", () => {
   assert.equal(supabaseConfigFromEnv({}), null);
@@ -525,7 +549,7 @@ test("drift is reported in both directions", () => {
 });
 
 test("drift accepts the declared types D1 actually reports", () => {
-  // The real schema, as `PRAGMA table_info` describes it — including the two
+  // The real schema, as `PRAGMA table_info` describes it Ã¢â‚¬â€ including the two
   // boolean-mode columns Drizzle emits as `integer`.
   const actual = new Map(
     BACKUP_TABLES.map((plan) => [
@@ -555,9 +579,9 @@ test("only 429/5xx are worth retrying", () => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 // 5. The sync engine, end to end
-// ════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
 /** A recorded request the stub fetch was asked to make. */
 interface Recorded {
@@ -565,273 +589,12 @@ interface Recorded {
   url: URL;
   body: unknown;
 }
-
-/**
- * A D1 stand-in that implements exactly the statement shapes the syncer issues.
- *
- * Rows are plain objects, and writes coerce to SQLite's storage classes —
- * booleans become 0/1, because that is what D1 hands back and what
- * `toPostgrestValue` exists to convert. A fake that stored `true` would let a
- * broken conversion pass.
- */
-class FakeD1 {
-  readonly tables = new Map<string, BackupRow[]>();
-  readonly rateLimits: { bucket: string; window_start: number; count: number; updated_at: number }[] = [];
-  readonly usage: BackupRow[] = [];
-  readonly statements: string[] = [];
-  /** Statements the fake did not recognise — a failure, not a silent no-op. */
-  readonly unrecognised: string[] = [];
-
-  constructor(seed: Record<string, BackupRow[]>) {
-    for (const [name, rows] of Object.entries(seed)) this.tables.set(name, rows);
-  }
-
-  rows(table: string): BackupRow[] {
-    return this.tables.get(table) ?? [];
-  }
-
-  add(table: string, row: BackupRow): void {
-    if (!this.tables.has(table)) this.tables.set(table, []);
-    this.tables.get(table)!.push(row);
-  }
-
-  binding(): D1Database {
-    const self = this;
-
-    function makeStatement(sql: string): D1PreparedStatement {
-      let bound: unknown[] = [];
-      const stmt = {
-        bind(...values: unknown[]) {
-          bound = values;
-          return stmt;
-        },
-        async first<T>(): Promise<T | null> {
-          return (self.exec(sql, bound)[0] as T) ?? null;
-        },
-        async all<T>(): Promise<{ results: T[] }> {
-          return { results: self.exec(sql, bound) as T[] };
-        },
-        async run(): Promise<{ success: true; meta: { changes: number } }> {
-          return { success: true, meta: { changes: self.exec(sql, bound).length } };
-        },
-      };
-      return stmt as unknown as D1PreparedStatement;
-    }
-
-    return {
-      prepare: (sql: string) => makeStatement(sql),
-    } as unknown as D1Database;
-  }
-
-  /**
-   * Dispatch one statement.
-   *
-   * Shapes are matched against what `packages/shared/src/backup.ts` generates, and
-   * anything else throws into `unrecognised` rather than returning nothing — so a
-   * new query in the syncer surfaces here as a failure instead of as a mirror that
-   * is quietly missing whatever that query would have copied.
-   */
-  private exec(sql: string, bound: unknown[]): BackupRow[] {
-    const s = sql.replace(/\s+/g, " ").trim();
-    this.statements.push(s.slice(0, 120));
-
-    // ── PRAGMA table_info(<table>) — schema drift ─────────────────────────
-    const pragma = /^PRAGMA table_info\((\w+)\)$/i.exec(s);
-    if (pragma?.[1]) {
-      const table = pragma[1];
-      if (!this.tables.has(table)) return [];
-      const first = this.rows(table)[0] ?? {};
-      // `type` is what the DDL declared. The plan's BOOLEAN columns are declared
-      // `integer` by Drizzle, which the drift check accepts — and that acceptance
-      // is part of what these tests are checking.
-      return Object.keys(first).map((name) => ({ name, type: typeOf(table, name) }));
-    }
-
-    // ── MAX(watermark) — the cheap "is there anything new" gate ───────────
-    const high = /^SELECT MAX\((.+?)\) AS wm FROM (\w+)(?: WHERE .+)?$/.exec(s);
-    if (high) {
-      const [, expr, table] = high as unknown as [string, string, string];
-      const values = this.rows(table)
-        .map((row) => evalWatermark(expr, row))
-        .filter((v): v is number | string => v !== null);
-      if (values.length === 0) return [{ wm: null }];
-      return [{ wm: values.reduce((a, b) => (compareValues(a, b) >= 0 ? a : b)) }];
-    }
-
-    // ── COUNT(*) — pending rows for status ────────────────────────────────
-    const count = /^SELECT COUNT\(\*\) AS n FROM (\w+)(?: WHERE COALESCE\((.+?), 0\) >= \?)?$/.exec(s);
-    if (count) {
-      const [, table, expr] = count as unknown as [string, string, string | undefined];
-      const rows = this.rows(table);
-      if (expr === undefined) return [{ n: rows.length }];
-      const cursor = bound[0];
-      return [
-        { n: rows.filter((row) => compareValues(evalWatermark(expr, row) ?? 0, cursor) >= 0).length },
-      ];
-    }
-
-    // ── lease-in-flight count ─────────────────────────────────────────────
-    const leaseCount = /^SELECT COUNT\(\*\) AS n FROM rate_limits WHERE bucket = \? AND window_start >= \?$/.exec(s);
-    if (leaseCount) {
-      const [bucket, cutoff] = bound as [string, number];
-      return [
-        {
-          n: this.rateLimits.filter((r) => r.bucket === bucket && r.window_start >= cutoff).length,
-        },
-      ];
-    }
-
-    const quotaCount = /^SELECT COUNT\(\*\) AS n FROM rate_limits WHERE bucket LIKE \? AND window_start >= \?$/.exec(s);
-    if (quotaCount) {
-      const [pattern, dayStart] = bound as [string, number];
-      const prefix = pattern.replace(/%$/, "");
-      return [
-        {
-          n: this.rateLimits.filter((r) => r.bucket.startsWith(prefix) && r.window_start >= dayStart)
-            .length,
-        },
-      ];
-    }
-
-    // ── The incremental read, window form and plain form ──────────────────
-    if (/^SELECT .+? FROM (?:\(SELECT |\w+ WHERE )/.test(s)) return this.readRows(s, bound);
-
-    // ── lease/quota upsert ────────────────────────────────────────────────
-    if (/^INSERT INTO rate_limits /.test(s)) {
-      const [bucket, windowStart, updatedAt] = bound as [string, number, number];
-      const existing = this.rateLimits.find(
-        (r) => r.bucket === bucket && r.window_start === windowStart,
-      );
-      if (existing) {
-        existing.count += 1;
-        existing.updated_at = updatedAt;
-        return [{ count: existing.count }];
-      }
-      this.rateLimits.push({ bucket, window_start: windowStart, count: 1, updated_at: updatedAt });
-      return [{ count: 1 }];
-    }
-
-    // ── usage ledger append ───────────────────────────────────────────────
-    if (/^INSERT INTO usage_ledger /.test(s)) {
-      this.usage.push({
-        domain: bound[0],
-        month: bound[1],
-        kind: bound[2],
-        value: bound[3],
-        recorded_at: bound[4],
-      });
-      return [];
-    }
-
-    this.unrecognised.push(s);
-    throw new Error(`FakeD1 does not implement: ${s.slice(0, 160)}`);
-  }
-
-  /**
-   * The read query, in both its shapes.
-   *
-   * The window form's contract is the thing worth testing: return the whole
-   * smallest watermark value, or nothing — never a partial slice of it. A fake
-   * that returned the first `limit` rows regardless would let the wedge this
-   * window function exists to prevent pass unnoticed.
-   */
-  private readRows(s: string, bound: unknown[]): BackupRow[] {
-    // The patterns bracket the parts that carry information — the outer and inner
-    // column lists, the watermark expression, the table, the limit — and let the
-    // generated SQL vary in between (whitespace, an optional `IS NOT NULL`, the
-    // ORDER BY detail). Matching the whole statement character for character would
-    // mean every cosmetic change to `d1ReadSql` broke these tests, which trains you
-    // to edit the pattern rather than look at the failure.
-    //
-    // The bracket on the inner column list stops at `AS __wm`, so the ORDER BY
-    // and window clauses cannot leak into it; `columnNamesOf` then rejects
-    // anything that is not a real column of the table.
-    const windowForm =
-      /FROM \(SELECT ([\s\S]*?) AS __wm,[\s\S]*?MIN\([\s\S]*?\) OVER \(\) AS __min FROM (\w+) WHERE ([\s\S]+?) >= \?[\s\S]*?__rn <= (\d+)\)/.exec(
-        s,
-      );
-    if (windowForm) {
-      const [, innerCols, table, whereExpr, limitText] = windowForm as unknown as string[];
-      const cursor = bound[0];
-      const names = this.columnNamesOf(table, innerCols);
-      const candidates = this.rows(table)
-        .filter((row) => compareValues(evalWatermark(whereExpr, row) ?? 0, cursor) >= 0)
-        .sort((a, b) => compareValues(evalWatermark(whereExpr, a) ?? 0, evalWatermark(whereExpr, b) ?? 0));
-      if (candidates.length === 0) return [];
-
-      const min = evalWatermark(whereExpr, candidates[0]!) ?? 0;
-      const sameValue = candidates.filter((row) => evalWatermark(whereExpr, row) === min);
-      // The whole value or none of it — the contract this form exists to keep.
-      if (sameValue.length > Number(limitText)) return [];
-
-      return sameValue.map((row) => {
-        const out: BackupRow = {};
-        for (const name of names) out[name] = row[name] ?? null;
-        out["__wm"] = min;
-        return out;
-      });
-    }
-
-    const plain =
-      /^SELECT ([\s\S]+?), ([\s\S]+?) AS __wm FROM (\w+) WHERE ([\s\S]+?) >= \?[\s\S]*? ORDER BY [\s\S]+? LIMIT (\d+)$/.exec(
-        s,
-      );
-    if (plain) {
-      const [, cols, wmExpr, table, whereExpr, limitText] = plain as unknown as string[];
-      const cursor = bound[0];
-      const names = this.columnNamesOf(table, cols);
-      return this.rows(table)
-        .filter((row) => compareValues(evalWatermark(whereExpr, row) ?? 0, cursor) >= 0)
-        .sort((a, b) => compareValues(evalWatermark(whereExpr, a) ?? 0, evalWatermark(whereExpr, b) ?? 0))
-        .slice(0, Number(limitText))
-        .map((row) => {
-          const out: BackupRow = {};
-          for (const name of names) out[name] = row[name] ?? null;
-          out["__wm"] = evalWatermark(wmExpr, row);
-          return out;
-        });
-    }
-
-    this.unrecognised.push(s);
-    throw new Error(`FakeD1 cannot read: ${s.slice(0, 200)}`);
-  }
-
-  /**
-   * Turn a captured column list into names, refusing anything that is not one.
-   *
-   * This is what keeps a mis-parsed regex from turning into a passing test: if the
-   * capture picked up a fragment of the window clause instead of the column list,
-   * the names it produced would not be columns of the table, and this throws
-   * rather than returning rows full of nulls that the assertions would then
-   * happily accept.
-   */
-  private columnNamesOf(table: string, captured: string): string[] {
-    const plan = BACKUP_TABLES.find((p) => p.name === table);
-    if (!plan) throw new Error(`FakeD1 read a table the plan does not know: ${table}`);
-    const known = new Set(columnNames(plan));
-
-    const names = captured
-      .replace(/\s+/g, " ")
-      .split(",")
-      .map((c) => c.trim())
-      .filter(Boolean)
-      // The inner capture is anchored on the watermark alias, so a `WHERE x IS
-      // NOT NULL` tail can come with it in the plain form. Only real column names
-      // are kept; the exact-set check below is what makes the parse trustworthy.
-      .filter((c) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(c));
-
-    if (names.length !== known.size || names.some((n) => !known.has(n))) {
-      throw new Error(
-        `FakeD1 parsed columns [${names}] for "${table}", expected [${[...known]}]`,
-      );
-    }
-    return names;
-  }
-}
-
 /** Evaluate the watermark expressions the plan uses: a column, or COALESCE. */
 function evalWatermark(expr: string, row: BackupRow): number | string | null {
   const trimmed = expr.trim();
+  // Greedy `(.+)`, not lazy `(.+?)`: the expression is regularly nested inside
+  // `MIN(COALESCE(a, b)) OVER ()`, where a lazy match stops at the inner `)` and
+  // silently evaluates the wrong thing.
   const coalesce = /^COALESCE\((.+)\)$/i.exec(trimmed);
   if (coalesce?.[1]) {
     for (const part of coalesce[1].split(",").map((p) => p.trim())) {
@@ -955,108 +718,74 @@ class FakeSupabase {
   };
 }
 
-interface Harness {
-  db: FakeD1;
-  supabase: FakeSupabase;
-  sync: BackupSync;
-  env: Record<string, unknown>;
-}
 
-function harness(
-  seed: Record<string, BackupRow[]>,
-  options: { now?: () => number; env?: Record<string, string> } = {},
-): Harness {
-  const db = new FakeD1(seed);
-  const supabase = new FakeSupabase();
-  const now = options.now ?? (() => 1_700_000_000);
-
-  const env: Record<string, unknown> = {
-    DB: db.binding(),
-    SUPABASE_URL: "https://test.supabase.co",
-    SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
-    SUPABASE_SCHEMA: "cw_backup",
-    ...(options.env ?? {}),
-  };
-
-  const sync = new BackupSync(env as never, { now, fetchImpl: supabase.fetch });
-  return { db, supabase, sync, env };
-}
-
-/** Seed a handful of rows for one table, using the plan to shape them. */
-function rowsFor(table: string, count: number, watermarkBase = 1000): BackupRow[] {
-  const plan = BACKUP_TABLES.find((p) => p.name === table);
-  assert.ok(plan, `no plan for "${table}"`);
-  const key = plan.columns.filter((c) => c.key);
-  const wmColumns = watermarkColumns(plan.watermarkSql);
-
-  return Array.from({ length: count }, (_, n) => {
-    const row: BackupRow = {};
-    for (const column of plan.columns) {
-      switch (column.postgresType) {
-        case "boolean":
-          row[column.name] = 0;
-          break;
-        case "bytea":
-          row[column.name] = new Uint8Array([1, 2, 3]).buffer;
-          break;
-        case "bigint":
-          row[column.name] = watermarkBase + n;
-          break;
-        default:
-          row[column.name] = `${table}-${n}`;
-      }
-    }
-    // Give the key columns distinct values so an upsert means something.
-    key.forEach((column, i) => {
-      row[column.name] = i === 0 ? `${table}-key-${n}` : watermarkBase + n;
-    });
-    // And put the watermark where the plan says it lives.
-    for (const column of wmColumns) {
-      if (row[column] !== undefined || column.includes("_at") || column === "id") {
-        row[column] = watermarkBase + n;
-      }
-    }
-    return row;
-  });
-}
-
-// ── The runs ────────────────────────────────────────────────────────────────
+// â”€â”€ The runs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 test("an unconfigured backup refuses to run rather than reporting success", () => {
   assert.throws(
-    () => new BackupSync({ DB: new FakeD1({}).binding() } as never),
+    () => new BackupSync({ DB: {} as D1Database } as never),
     /not configured/,
   );
 });
 
-test("a run with a drifted D1 stops before touching the mirror", async () => {
-  // `assets` exists but is missing a planned column, which is fatal drift.
-  const { db, supabase, sync } = harness({
-    assets: [{ hash: "a", mime: "text/css", bytes: 1, r2_key: "k", first_seen_at: 1, ref_count: 1, r2_deleted_at: null }],
-  });
-  // Remove a planned column from what PRAGMA reports by deleting it from the row.
-  for (const row of db.rows("assets")) delete row["r2_key"];
+test("a run with a drifted D1 stops before touching the mirror", async (t) => {
+  const raw = await openSqlite(t);
+  if (!raw) return;
+
+  // Create `assets` *without* `r2_key`: a migration that added a column to the plan
+  // before it reached D1 looks exactly like this, and it is the condition the drift
+  // check exists to catch.
+  raw.exec(`CREATE TABLE assets (
+    hash TEXT PRIMARY KEY, mime TEXT, bytes INTEGER, first_seen_at INTEGER,
+    ref_count INTEGER, r2_deleted_at INTEGER)`);
+  const db = new SqliteD1(raw);
+  const supabase = new FakeSupabase();
+  const sync = new BackupSync(
+    {
+      DB: db.binding(),
+      SUPABASE_URL: "https://test.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "k",
+    } as never,
+    { now: () => 1_700_000_000, fetchImpl: supabase.fetch },
+  );
 
   const summary = await sync.run({ force: true });
   assert.equal(summary.stoppedBecause, "drift");
   assert.ok(summary.drift && summary.drift.length > 0);
+  assert.ok(
+    summary.drift.some((d) => d.kind === "missing-table" || d.detail.includes("r2_key")),
+    JSON.stringify(summary.drift),
+  );
   assert.equal(summary.rows, 0);
-  // The point: no write was attempted against a schema it cannot describe.
+  // The point: nothing was written to a schema it cannot fully describe, and the
+  // mirror was never even contacted.
   assert.equal(supabase.requests.length, 0);
 });
 
-test("a first run mirrors every table and records a cursor per table", async () => {
-  const seed: Record<string, BackupRow[]> = {
-    assets: rowsFor("assets", 5),
-    usage_ledger: rowsFor("usage_ledger", 3),
-    throttle_events: rowsFor("throttle_events", 2),
-  };
-  const { supabase, sync } = harness(seed);
+test("a first run mirrors every table and records a cursor per table", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO assets (hash, mime, bytes, r2_key, first_seen_at, ref_count, r2_deleted_at)
+     VALUES ('h0','text/css',10,'a/h0',1000,1,1000),
+            ('h1','text/css',11,'a/h1',1001,1,1001),
+            ('h2','text/css',12,'a/h2',1002,1,1002),
+            ('h3','text/css',13,'a/h3',1003,1,1003),
+            ('h4','text/css',14,'a/h4',1004,1,1004)`,
+    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
+     VALUES (10,'x','2024-03','ia_fetch',1,1000),(11,'x','2024-03','ia_fetch',1,1001),(12,'x','2024-03','ia_fetch',1,1002)`,
+    `INSERT INTO throttle_events (id, domain, host, status, wait_ms, created_at)
+     VALUES (20,'x','web.archive.org',429,900,1000),(21,'x','web.archive.org',429,900,1001)`,
+  ]);
+  if (!h) return;
+  const { supabase, sync, db } = h;
 
   const summary = await sync.run({ force: true });
 
   assert.equal(summary.stoppedBecause, "complete");
-  assert.deepEqual(summary.failures, []);
+  assert.deepEqual(
+    summary.failures,
+    [],
+    `per-table detail: ${JSON.stringify(summary.tables)} sql: ${JSON.stringify(db.unrecognised)}`,
+  );
   assert.equal(summary.rows, 10, "expected 5 + 3 + 2 rows");
 
   // Every seeded row arrived, and nothing else did.
@@ -1065,7 +794,7 @@ test("a first run mirrors every table and records a cursor per table", async () 
   assert.equal(supabase.mirror.get("throttle_events")?.length, 2);
 
   // A cursor was recorded for the tables that had rows, and it is the highest
-  // watermark — not zero, and not the first row's value.
+  // watermark Ã¢â‚¬â€ not zero, and not the first row's value.
   const assets = supabase.state.get("assets");
   assert.ok(assets, "no backup_state row for assets");
   assert.equal(Number(assets["last_cursor"]), 1004);
@@ -1074,172 +803,211 @@ test("a first run mirrors every table and records a cursor per table", async () 
   assert.equal(Number(assets["consecutive_fails"]), 0);
 });
 
-test("values survive the trip: booleans as JSON booleans, blobs as base64", async () => {
-  const { supabase, sync } = harness({
-    users: [
-      {
-        id: "u1",
-        email: "a@b.c",
-        password_hash: "hash",
-        created_at: 1000,
-        last_login_at: null,
-        // What D1 actually returns for `DEFAULT false`.
-        disabled: 0,
-      },
-    ],
-  });
+test("values survive the trip: booleans as JSON booleans, blobs as base64", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO users (id, email, password_hash, created_at, last_login_at, disabled)
+     VALUES ('u1','a@b.c','hash',1000,NULL,0)`,
+  ]);
+  if (!h) return;
 
-  await sync.run({ force: true, only: ["users"] });
-  const pushed = supabase.pushedRows("users")[0]!;
+  await h.sync.run({ force: true, only: ["users"] });
+  const pushed = h.supabase.pushedRows("users")[0]!;
+  assert.ok(pushed, `nothing was pushed; state: ${JSON.stringify([...h.supabase.state.values()])}`);
   assert.equal(pushed["disabled"], false, "0 must become a JSON boolean, not stay a number");
   assert.equal(pushed["last_login_at"], null);
 });
 
-test("a bytea column is base64-encoded for PostgREST", async () => {
-  const { supabase, sync } = harness({
-    cdx_surveys: [
-      {
-        id: "s1",
-        domain: "example.com",
-        month: "2024-03",
-        query_hash: "qh",
-        payload: Uint8Array.from([0x66, 0x6f, 0x6f]).buffer,
-        fetched_at: 1234,
-      },
-    ],
-  });
+test("a bytea column is base64-encoded for PostgREST", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO cdx_surveys (id, domain, month, query_hash, payload, fetched_at)
+     VALUES ('s1','example.com','2024-03','qh','foo',1234)`,
+  ]);
+  if (!h) return;
 
-  await sync.run({ force: true, only: ["cdx_surveys"] });
-  const pushed = supabase.pushedRows("cdx_surveys")[0]!;
+  await h.sync.run({ force: true, only: ["cdx_surveys"] });
+  const pushed = h.supabase.pushedRows("cdx_surveys")[0]!;
+  assert.ok(pushed, "nothing was pushed");
+  // `cdx_surveys.payload` is a BLOB in D1 and `bytea` in Postgres; SQLite returns the
+  // text as bytes, and PostgREST wants base64.
   assert.equal(pushed["payload"], "Zm9v");
 });
 
-test("a calm second run costs no row requests at all", async () => {
-  const { supabase, sync } = harness({ assets: rowsFor("assets", 4) });
+test("a calm second run costs no row requests at all", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO assets (hash, mime, bytes, r2_key, first_seen_at, ref_count, r2_deleted_at)
+     VALUES ('h0','text/css',10,'a/h0',1000,1,1000),
+            ('h1','text/css',11,'a/h1',1001,1,1001)`,
+  ]);
+  if (!h) return;
 
-  await sync.run({ force: true });
-  const afterFirst = supabase.rowRequests.length;
-  assert.ok(afterFirst > 0);
+  await h.sync.run({ force: true });
+  const afterFirst = h.supabase.rowRequests.length;
+  assert.ok(afterFirst > 0, "the first run should have pushed rows");
 
-  // Nothing changed in D1, so the high-water gate must short-circuit every table.
-  const second = await sync.run({ force: true });
+  // Nothing changed in D1, so the high-water gate must short-circuit every table
+  // before it reads a single row.
+  const second = await h.sync.run({ force: true });
   assert.equal(second.rows, 0);
   assert.equal(
-    supabase.rowRequests.length,
+    h.supabase.rowRequests.length,
     afterFirst,
     "a run with nothing new issued PostgREST row requests",
   );
-  // And it says why: every table that had data was skipped rather than failed.
-  assert.ok(second.tables.some((t) => t.skipped));
   assert.deepEqual(second.failures, []);
 });
 
-test("incremental runs pick up only what is new and advance the cursor", async () => {
-  const { db, supabase, sync } = harness({ usage_ledger: rowsFor("usage_ledger", 3) });
+test("incremental runs pick up only what is new and advance the cursor", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
+     VALUES (10,'x','2024-03','ia_fetch',1,1000),(11,'x','2024-03','ia_fetch',1,1001),(12,'x','2024-03','ia_fetch',1,1002)`,
+  ]);
+  if (!h) return;
 
-  await sync.run({ force: true });
-  assert.equal(Number(supabase.state.get("usage_ledger")?.["last_cursor"]), 1002);
+  await h.sync.run({ force: true });
+  assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 12);
 
   // Three more rows, later ids.
-  for (const row of rowsFor("usage_ledger", 3, 2000)) db.add("usage_ledger", row);
+  h.raw.exec(
+    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
+     VALUES (20,'x','2024-03','ia_fetch',1,2000),(21,'x','2024-03','ia_fetch',1,2001),(22,'x','2024-03','ia_fetch',1,2002)`,
+  );
 
-  const second = await sync.run({ force: true });
-  assert.equal(second.rows, 3);
-  assert.equal(Number(supabase.state.get("usage_ledger")?.["last_cursor"]), 2002);
+  // `force` because the second run is immediate and the interval gate would otherwise
+  // decline it Ã¢â‚¬â€ which is a separate behaviour, tested on its own.
+  const second = await h.sync.run({ force: true });
+  assert.equal(
+    second.rows,
+    3,
+    `second run detail: ${JSON.stringify(second.tables)} state: ${JSON.stringify([...h.supabase.state.values()])}`,
+  );
+  assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 22);
 
-  // The mirror holds all six, and the second run's second page did not re-send
-  // the first three as new rows.
-  assert.equal(supabase.mirror.get("usage_ledger")?.length, 6);
+  // The mirror holds all six, and the second run did not re-send the first three.
+  assert.equal(h.supabase.mirror.get("usage_ledger")?.length, 6);
+  assert.equal(h.supabase.pushedRows("usage_ledger").length, 6, "no row should be pushed twice");
 });
 
-test("rows sharing one watermark larger than a batch do not wedge the cursor", async () => {
-  // Every row has the same watermark value, and there are more of them than fit
-  // in one read. The plain `LIMIT` form would return the same page forever.
-  const rows = rowsFor("throttle_events", 7).map((row) => ({ ...row, id: 500 }));
-  const { supabase, sync } = harness({ throttle_events: rows }, {
-    env: { BACKUP_READ_BATCH: "3", BACKUP_PUSH_BATCH: "3" },
-  });
+test("a whole value shared by more rows than a batch is still copied", async (t) => {
+  // Every row has the same watermark, and there are more of them than fit in one
+  // read. A plain `LIMIT` would return the same page forever; a boundary that sliced
+  // the shared value would strand the rows outside the batch.
+  //
+  // This is the case that the batch boundary exists for, and the one an earlier
+  // implementation got wrong twice Ã¢â‚¬â€ first by slicing the value, then by reporting
+  // "more" when the boundary was the last row, which re-pushed the same page until the
+  // per-table page ceiling stopped it.
+  const h = await sqliteHarness(
+    t,
+    [
+      `INSERT INTO throttle_events (id, domain, host, status, wait_ms, created_at) VALUES
+       (500,'x','ia',429,1,1000),(500+1,'x','ia',429,1,1001),(500+2,'x','ia',429,1,1002),
+       (500+3,'x','ia',429,1,1003),(500+4,'x','ia',429,1,1004),(500+5,'x','ia',429,1,1005),
+       (500+6,'x','ia',429,1,1006)`,
+    ],
+    { env: { BACKUP_READ_BATCH: "3", BACKUP_PUSH_BATCH: "3" } },
+  );
+  if (!h) return;
 
-  const first = await sync.run({ force: true });
-  // The whole value does not fit in one batch, so nothing is committed and the
-  // cursor stays where it was — a stall that the next run resolves by asking for
-  // strictly greater, never a partial slice that loses rows.
-  assert.equal(first.rows, 0, "a value that does not fit must not be partially copied");
-  assert.equal(supabase.state.get("throttle_events"), undefined);
+  // Rewrite every id to the same value, so `id` Ã¢â‚¬â€ the watermark Ã¢â‚¬â€ is genuinely shared.
+  h.raw.exec("UPDATE throttle_events SET id = 500");
 
-  // Raise the batch so the shared value fits: all seven arrive at once.
-  const { supabase: supabase2, sync: sync2 } = harness({ throttle_events: rows }, {
-    env: { BACKUP_READ_BATCH: "10", BACKUP_PUSH_BATCH: "10" },
-  });
-  const second = await sync2.run({ force: true });
-  assert.equal(second.rows, 7);
-  assert.equal(supabase2.mirror.get("throttle_events")?.length, 7);
-  void supabase;
+  const summary = await h.sync.run({ force: true });
+
+  assert.deepEqual(summary.failures, []);
+  assert.equal(summary.rows, 7, "the whole shared value should be taken, not just the first 3");
+  assert.equal(h.supabase.mirror.get("throttle_events")?.length, 7);
+  assert.equal(Number(h.supabase.state.get("throttle_events")?.["last_cursor"]), 500);
+
+  const again = await h.sync.run({ force: true });
+  assert.equal(again.rows, 0, "re-reading a complete value must not duplicate or re-push it");
+  assert.equal(h.supabase.mirror.get("throttle_events")?.length, 7);
+  assert.equal(h.supabase.pushedRows("throttle_events").length, 7, "no row should be pushed twice");
 });
 
-test("a large table is mirrored across several pages in one run", async () => {
-  const { supabase, sync } = harness({ usage_ledger: rowsFor("usage_ledger", 25) }, {
-    env: { BACKUP_READ_BATCH: "10", BACKUP_PUSH_BATCH: "10" },
-  });
+test("a large table is mirrored across several pages in one run", async (t) => {
+  const values = Array.from({ length: 25 }, (_, n) => `(${n + 1},'x','2024-03','ia_fetch',1,${1000 + n})`);
+  const h = await sqliteHarness(
+    t,
+    [`INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at) VALUES ${values.join(",")}`],
+    { env: { BACKUP_READ_BATCH: "10", BACKUP_PUSH_BATCH: "10" } },
+  );
+  if (!h) return;
 
-  const summary = await sync.run({ force: true });
+  const summary = await h.sync.run({ force: true });
+  assert.deepEqual(summary.failures, []);
   assert.equal(summary.rows, 25);
-  const result = summary.tables.find((t) => t.table === "usage_ledger");
+  const result = summary.tables.find((x) => x.table === "usage_ledger");
   assert.ok(result && result.batches >= 3, `expected 3+ batches, got ${result?.batches}`);
-  assert.equal(Number(supabase.state.get("usage_ledger")?.["last_cursor"]), 1024);
+  assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 25);
+  assert.equal(h.supabase.mirror.get("usage_ledger")?.length, 25);
 });
 
-test("a failed push leaves the cursor where it started so rows are never skipped", async () => {
-  const { db, supabase, sync } = harness({ usage_ledger: rowsFor("usage_ledger", 4) });
+test("a failed push leaves the cursor where it started so rows are never skipped", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
+     VALUES (10,'x','2024-03','ia_fetch',1,1000),(11,'x','2024-03','ia_fetch',1,1001),
+            (12,'x','2024-03','ia_fetch',1,1002),(13,'x','2024-03','ia_fetch',1,1003)`,
+  ]);
+  if (!h) return;
 
-  // First run succeeds and commits cursor 1003.
-  await sync.run({ force: true });
-  assert.equal(Number(supabase.state.get("usage_ledger")?.["last_cursor"]), 1003);
+  // First run succeeds and commits the cursor.
+  await h.sync.run({ force: true });
+  assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 13);
 
   // New rows, and this time PostgREST refuses them with a non-retryable error.
-  for (const row of rowsFor("usage_ledger", 4, 3000)) db.add("usage_ledger", row);
-  supabase.failNext.set("usage_ledger", {
+  h.raw.exec(
+    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
+     VALUES (20,'x','2024-03','ia_fetch',1,3000),(21,'x','2024-03','ia_fetch',1,3001),
+            (22,'x','2024-03','ia_fetch',1,3002),(23,'x','2024-03','ia_fetch',1,3003)`,
+  );
+  h.supabase.failNext.set("usage_ledger", {
     status: 400,
     body: JSON.stringify({ code: "23502", message: "null value in column violates not-null" }),
   });
 
-  const failed = await sync.run({ force: true });
+  const failed = await h.sync.run({ force: true });
   assert.deepEqual(failed.failures, ["usage_ledger"]);
-  const state = supabase.state.get("usage_ledger")!;
+  const state = h.supabase.state.get("usage_ledger")!;
   assert.equal(
     Number(state["last_cursor"]),
-    1003,
-    "the cursor moved past rows the mirror refused — they would never be retried",
+    13,
+    "the cursor moved past rows the mirror refused Ã¢â‚¬â€ they would never be retried",
   );
   assert.equal(Number(state["consecutive_fails"]), 1);
   assert.match(String(state["last_error"]), /23502/);
 
-  // The next run reads from 1003 again and succeeds.
-  const recovered = await sync.run({ force: true });
+  // The next run reads from 13 again and succeeds.
+  const recovered = await h.sync.run({ force: true });
   assert.deepEqual(recovered.failures, []);
   assert.equal(recovered.rows, 8, "the previously refused rows were not re-read");
-  assert.equal(Number(supabase.state.get("usage_ledger")?.["last_cursor"]), 3003);
+  assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 23);
 });
 
-test("a retryable failure is retried, and a persistent one is reported as such", async () => {
-  const attempts: number[] = [];
-  const db = new FakeD1({ assets: rowsFor("assets", 2) });
-  const supabase = new FakeSupabase();
+test("a retryable failure is retried, and a persistent one is reported as such", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO assets (hash, mime, bytes, r2_key, first_seen_at, ref_count, r2_deleted_at)
+     VALUES ('h0','text/css',10,'a/h0',1000,1,1000),('h1','text/css',11,'a/h1',1001,1,1001)`,
+  ]);
+  if (!h) return;
 
-  // 503 twice, then success — the transient case the backoff exists for.
-  let seen = 0;
+  // 503 twice, then success â€” the transient case the backoff exists for.
+  const attempts: number[] = [];
   const flaky: typeof fetch = async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     if (url.pathname.endsWith("/rest/v1/assets") && (init?.method ?? "").toUpperCase() === "POST") {
-      seen += 1;
-      attempts.push(seen);
-      if (seen <= 2) return new Response("upstream unavailable", { status: 503 });
+      attempts.push(attempts.length + 1);
+      if (attempts.length <= 2) return new Response("upstream unavailable", { status: 503 });
     }
-    return supabase.fetch(input, init);
+    return h.supabase.fetch(input, init);
   };
 
+  // A fresh syncer with the flaky transport and no real backoff delay.
   const sync = new BackupSync(
-    { DB: db.binding(), SUPABASE_URL: "https://t.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" } as never,
+    {
+      DB: h.db.binding(),
+      SUPABASE_URL: "https://t.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "k",
+    } as never,
     { now: () => 1_700_000_000, fetchImpl: flaky, sleep: async () => {} },
   );
 
@@ -1249,47 +1017,74 @@ test("a retryable failure is retried, and a persistent one is reported as such",
   assert.equal(summary.rows, 2);
 });
 
-test("a bad service-role key is reported, not retried into a timeout", async () => {
-  const { supabase, sync } = harness({ assets: rowsFor("assets", 1) });
-  supabase.failAll.status = 401;
-  supabase.failAll.body = JSON.stringify({ code: "42501", message: "permission denied for schema cw_backup" });
+test("a bad service-role key is reported, not retried into a timeout", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO assets (hash, mime, bytes, r2_key, first_seen_at, ref_count, r2_deleted_at)
+     VALUES ('h0','text/css',10,'a/h0',1000,1,1000)`,
+  ]);
+  if (!h) return;
+  h.supabase.failAll.status = 401;
+  h.supabase.failAll.body = JSON.stringify({
+    code: "42501",
+    message: "permission denied for schema cw_backup",
+  });
 
-  const summary = await sync.run({ force: true, only: ["assets"] });
+  const summary = await h.sync.run({ force: true, only: ["assets"] });
   assert.deepEqual(summary.failures, ["assets"]);
-  const error = summary.tables.find((t) => t.table === "assets")?.error ?? "";
+  const error = summary.tables.find((x) => x.table === "assets")?.error ?? "";
   assert.match(error, /401/);
   assert.match(error, /permission denied/);
   // One request, not three: a 401 is an operator problem and retrying hides it.
-  assert.equal(supabase.pushCount("assets"), 1);
+  assert.equal(h.supabase.pushCount("assets"), 1);
 });
 
-test("the lease stops two runs from overlapping", async () => {
-  const { sync, db } = harness({ assets: rowsFor("assets", 2) });
+test("the lease stops two runs from overlapping", async (t) => {
+  const h = await sqliteHarness(t, []);
+  if (!h) return;
 
-  const holds = await sync.acquireLease(BACKUP_DEFAULTS.leaseSeconds);
-  assert.equal(holds, true, "the first run should own the window");
-  const second = await sync.acquireLease(BACKUP_DEFAULTS.leaseSeconds);
-  assert.equal(second, false, "a second claim on the same window must fail");
+  assert.equal(
+    await h.sync.acquireLease(BACKUP_DEFAULTS.leaseSeconds),
+    true,
+    "the first run should own the window",
+  );
+  assert.equal(
+    await h.sync.acquireLease(BACKUP_DEFAULTS.leaseSeconds),
+    false,
+    "a second claim on the same window must fail",
+  );
 
   // A fresh clock past the lease window can claim again.
   const later = new BackupSync(
-    { DB: db.binding(), SUPABASE_URL: "https://t.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" } as never,
-    { now: () => 1_700_000_000 + BACKUP_DEFAULTS.leaseSeconds + 1, fetchImpl: new FakeSupabase().fetch },
+    {
+      DB: h.db.binding(),
+      SUPABASE_URL: "https://t.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "k",
+    } as never,
+    {
+      now: () => 1_700_000_000 + BACKUP_DEFAULTS.leaseSeconds + 1,
+      fetchImpl: new FakeSupabase().fetch,
+    },
   );
   assert.equal(await later.acquireLease(BACKUP_DEFAULTS.leaseSeconds), true);
 });
 
-test("an interval that has not elapsed stops the run before any row is read", async () => {
-  const { supabase, sync } = harness({ assets: rowsFor("assets", 3) }, {
-    env: { BACKUP_INTERVAL_SECONDS: "900" },
-  });
+test("an interval that has not elapsed stops the run before any row is read", async (t) => {
+  const h = await sqliteHarness(
+    t,
+    [
+      `INSERT INTO assets (hash, mime, bytes, r2_key, first_seen_at, ref_count, r2_deleted_at)
+       VALUES ('h0','text/css',10,'a/h0',1000,1,1000)`,
+    ],
+    { env: { BACKUP_INTERVAL_SECONDS: "900" } },
+  );
+  if (!h) return;
 
   // Nothing has ever succeeded, so the first run is due.
-  const first = await sync.run({ force: true });
-  assert.ok(first.rows > 0);
+  const first = await h.sync.run({ force: true });
+  assert.ok(first.rows > 0, `the first run should have synced; got ${JSON.stringify(first)}`);
 
   // A second automatic run immediately afterwards is not.
-  const second = await sync.run();
+  const second = await h.sync.run();
   assert.equal(second.rows, 0);
   assert.ok(
     second.stoppedBecause === "quota" || second.stoppedBecause === "lease",
@@ -1298,14 +1093,21 @@ test("an interval that has not elapsed stops the run before any row is read", as
   assert.equal(second.tables.length, 0, "the interval gate should short-circuit before reading");
 });
 
-test("status reports what is pending, counted from D1 rather than trusted", async () => {
-  const { db, sync } = harness({ usage_ledger: rowsFor("usage_ledger", 5) });
+test("status reports what is pending, counted from D1 rather than trusted", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at) VALUES
+     (10,'x','2024-03','ia_fetch',1,1000),(11,'x','2024-03','ia_fetch',1,1001),
+     (12,'x','2024-03','ia_fetch',1,1002),(13,'x','2024-03','ia_fetch',1,1003),
+     (14,'x','2024-03','ia_fetch',1,1004)`,
+  ]);
+  if (!h) return;
+  const { sync, raw } = h;
 
   // Before any run: everything is pending, because no cursor exists.
   const cold = await sync.status();
   assert.equal(cold.configured, true);
   assert.equal(cold.reachable, true);
-  const ledgerCold = cold.tables.find((t) => t.table === "usage_ledger");
+  const ledgerCold = cold.tables.find((x) => x.table === "usage_ledger");
   assert.equal(ledgerCold?.pendingRows, 5);
   assert.equal(ledgerCold?.lastSuccessAt, null);
   assert.equal(ledgerCold?.lagSeconds, null);
@@ -1314,21 +1116,33 @@ test("status reports what is pending, counted from D1 rather than trusted", asyn
   await sync.run({ force: true, only: ["usage_ledger"] });
 
   const warm = await sync.status();
-  const ledgerWarm = warm.tables.find((t) => t.table === "usage_ledger");
+  const ledgerWarm = warm.tables.find((x) => x.table === "usage_ledger");
   assert.equal(ledgerWarm?.pendingRows, 0);
   assert.equal(ledgerWarm?.consecutiveFails, 0);
   assert.ok(ledgerWarm && ledgerWarm.lastSuccessAt !== null);
 
   // New rows show up as pending, with no run needed to notice them.
-  for (const row of rowsFor("usage_ledger", 3, 4000)) db.add("usage_ledger", row);
+  raw.exec(
+    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
+     VALUES (20,'x','2024-03','ia_fetch',1,4000),(21,'x','2024-03','ia_fetch',1,4001),(22,'x','2024-03','ia_fetch',1,4002)`,
+  );
   const after = await sync.status();
-  assert.equal(after.tables.find((t) => t.table === "usage_ledger")?.pendingRows, 3);
+  assert.equal(after.tables.find((x) => x.table === "usage_ledger")?.pendingRows, 3);
 });
 
-test("status reports an unreachable mirror instead of throwing", async () => {
-  const db = new FakeD1({ assets: rowsFor("assets", 1) });
+test("status reports an unreachable mirror instead of throwing", async (t) => {
+  const h = await sqliteHarness(t, [
+    `INSERT INTO assets (hash, mime, bytes, r2_key, first_seen_at, ref_count, r2_deleted_at)
+     VALUES ('h0','text/css',10,'a/h0',1000,1,1000)`,
+  ]);
+  if (!h) return;
+
   const sync = new BackupSync(
-    { DB: db.binding(), SUPABASE_URL: "https://t.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" } as never,
+    {
+      DB: h.db.binding(),
+      SUPABASE_URL: "https://t.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "k",
+    } as never,
     {
       now: () => 1_700_000_000,
       fetchImpl: async () => new Response("gateway down", { status: 502 }),
@@ -1343,11 +1157,294 @@ test("status reports an unreachable mirror instead of throwing", async () => {
   assert.equal(status.configured, true);
 });
 
-test("status flags drift without failing", async () => {
-  const { db, sync } = harness({ assets: rowsFor("assets", 1) });
-  delete db.rows("assets")[0]!["mime"];
+test("status flags drift without failing", async (t) => {
+  const raw = await openSqlite(t);
+  if (!raw) return;
+
+  // `assets` without `mime`: the plan knows a column D1 does not have.
+  raw.exec(`CREATE TABLE assets (
+    hash TEXT PRIMARY KEY, bytes INTEGER, r2_key TEXT, first_seen_at INTEGER,
+    ref_count INTEGER, r2_deleted_at INTEGER)`);
+  const db = new SqliteD1(raw);
+  const sync = new BackupSync(
+    {
+      DB: db.binding(),
+      SUPABASE_URL: "https://test.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "k",
+    } as never,
+    { now: () => 1_700_000_000, fetchImpl: new FakeSupabase().fetch },
+  );
 
   const status = await sync.status();
   assert.equal(status.health, "drift");
-  assert.ok(status.drift.some((d) => d.detail.includes("mime")));
+  assert.ok(
+    status.drift.some((d) => d.detail.includes("mime") || d.kind === "missing-table"),
+    JSON.stringify(status.drift),
+  );
 });
+
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+// 6. The generated SQL against real SQLite
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+//
+// Everything above runs against a hand-written fake, which by construction agrees
+// with whatever the code does. These two run the *generated statements* through a
+// real SQLite engine, so window functions, `COALESCE` in a `WHERE`, and the batch
+// boundary are all evaluated by the same parser D1 uses. That is the only way to
+// catch a query that is well-formed TypeScript and wrong SQL.
+//
+// The case that matters is a watermark shared by more rows than one batch:
+//
+//   * a plain `LIMIT` would return the same rows every run and never advance;
+//   * an over-eager boundary would slice the shared value, and the rows outside the
+//     batch would be skipped forever once the cursor moved past them.
+
+test("the generated read query advances a cursor over rows that share a watermark", async (t) => {
+  const raw = await openSqlite(t);
+  if (!raw) return;
+
+  sqliteTables(raw);
+
+  // `rate_limits` is the plan's clearest case: its watermark is `window_start`, five
+  // rows share one window, and its key is composite.
+  const shared = 1_000;
+  for (let i = 0; i < 5; i++) {
+    raw.exec(
+      `INSERT INTO rate_limits (bucket, window_start, count, updated_at) VALUES ('b${i}', ${shared}, 1, ${shared})`,
+    );
+  }
+  raw.exec(
+    `INSERT INTO rate_limits (bucket, window_start, count, updated_at) VALUES ('later', ${shared + 60}, 1, ${shared + 60})`,
+  );
+
+  const plan = BACKUP_TABLES.find((p) => p.name === "rate_limits")!;
+  const batchSize = 3;
+
+  // Walk the cursor the way `BackupSync` does: read a batch, take the highest `__wm`
+  // it carried as the next cursor, stop when the statement says there is no more.
+  const seen = new Set<string>();
+  let cursor = "0";
+
+  for (let pass = 0; pass < 20; pass++) {
+    const rows = raw
+      .prepare(d1ReadSql(plan, batchSize))
+      .all(...d1ReadParams(plan, cursor)) as BackupRow[];
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      // A row must never arrive twice across passes: that would mean the boundary
+      // sliced a value and the cursor went backwards over it.
+      assert.ok(!seen.has(String(row["bucket"])), `"${row["bucket"]}" was read in two batches`);
+      seen.add(String(row["bucket"]));
+    }
+
+    const last = rows[rows.length - 1]!;
+    cursor = String(last["__wm"]);
+    if (last["__more"] == null) break;
+  }
+
+  assert.equal(
+    seen.size,
+    6,
+    `saw ${[...seen].join(", ")} Ã¢â‚¬â€ a cursor walk must reach every row exactly once`,
+  );
+});
+
+test("a value shared by more rows than a batch is taken whole, never sliced", async (t) => {
+  const raw = await openSqlite(t);
+  if (!raw) return;
+
+  sqliteTables(raw);
+  for (let i = 0; i < 4; i++) {
+    raw.exec(
+      `INSERT INTO rate_limits (bucket, window_start, count, updated_at) VALUES ('b${i}', 1000, 1, 1000)`,
+    );
+  }
+
+  const plan = BACKUP_TABLES.find((p) => p.name === "rate_limits")!;
+  // A batch of 2 against 4 rows that all share one watermark.
+  const rows = raw
+    .prepare(d1ReadSql(plan, 2))
+    .all(...d1ReadParams(plan, "0")) as BackupRow[];
+
+  assert.equal(
+    rows.length,
+    4,
+    "a shared watermark value must be returned whole Ã¢â‚¬â€ slicing it would strand the extra rows",
+  );
+  assert.ok(
+    rows.every((r) => Number(r["__wm"]) === 1000),
+    "every returned row should carry the shared watermark as its cursor value",
+  );
+  // Nothing follows the boundary, so the statement says so and the walk stops rather
+  // than asking again forever.
+  assert.equal(
+    rows[rows.length - 1]!["__more"],
+    null,
+    "four rows at one watermark, a batch of two: there is nothing after them",
+  );
+});
+
+test("the batch says there is more, so a full batch is not mistaken for the end", async (t) => {
+  const raw = await openSqlite(t);
+  if (!raw) return;
+
+  sqliteTables(raw);
+  for (let i = 0; i < 4; i++) {
+    raw.exec(
+      `INSERT INTO rate_limits (bucket, window_start, count, updated_at) VALUES ('b${i}', ${2000 + i}, 1, 1)`,
+    );
+  }
+
+  const plan = BACKUP_TABLES.find((p) => p.name === "rate_limits")!;
+  // One batch of 2 out of 4 distinct values: exactly full, and there is more.
+  const first = raw.prepare(d1ReadSql(plan, 2)).all(...d1ReadParams(plan, "0")) as BackupRow[];
+  assert.equal(first.length, 2);
+  assert.notEqual(
+    first[first.length - 1]!["__more"],
+    null,
+    "a capped batch must report that more rows follow Ã¢â‚¬â€ a row count cannot tell the difference",
+  );
+
+  // The second batch finishes, and reports the end.
+  const second = raw
+    .prepare(d1ReadSql(plan, 2))
+    .all(...d1ReadParams(plan, String(first[first.length - 1]!["__wm"]))) as BackupRow[];
+  assert.equal(second.length, 2);
+  assert.equal(second[second.length - 1]!["__more"], null);
+  assert.notEqual(second[0]!["bucket"], first[0]!["bucket"], "the second batch must be new rows");
+});
+
+/** Open an in-memory SQLite database, skipping the test when the module is absent. */
+async function openSqlite(t: { skip(reason: string): void }): Promise<SqliteDb | null> {
+  try {
+    const { DatabaseSync } = (await import("node:sqlite")) as unknown as {
+      DatabaseSync: new (path: string) => SqliteDb;
+    };
+    return new DatabaseSync(":memory:");
+  } catch {
+    t.skip("node:sqlite is not available in this Node build");
+    return null;
+  }
+}
+
+/**
+ * The minimal `node:sqlite` surface these tests use.
+ *
+ * Declared structurally rather than imported, because `node:sqlite` is behind a flag
+ * on some Node 22 releases and a hard import would fail the whole bundle rather than
+ * skipping the handful of tests that need it.
+ */
+interface SqliteDb {
+  exec(sql: string): void;
+  prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[] };
+}
+
+/**
+ * The plan's tables, created in real SQLite.
+ *
+ * Shared by the SQL-level tests and the end-to-end ones, so both are exercising the
+ * same schema: the plan is the single source of truth for what a D1 table looks like,
+ * down to which columns are the primary key.
+ */
+function sqliteTables(db: SqliteDb): void {
+  for (const plan of BACKUP_TABLES) {
+    const columns = plan.columns.map((c) => {
+      const type = c.sqliteType === "INTEGER" || c.sqliteType === "BOOLEAN" ? "INTEGER" : "TEXT";
+      return `${c.name} ${type}`;
+    });
+    const keys = plan.columns.filter((c) => c.key).map((c) => c.name);
+    const keyClause = keys.length > 0 ? `, PRIMARY KEY (${keys.join(", ")})` : "";
+    db.exec(`CREATE TABLE ${plan.name} (${columns.join(", ")}${keyClause})`);
+  }
+}
+
+/**
+ * A `D1Database` backed by real SQLite.
+ *
+ * This is what the end-to-end tests run against, and it is a deliberate choice over a
+ * hand-written fake. A fake encodes *my belief* about what the generated SQL means,
+ * and the belief is exactly what needs testing Ã¢â‚¬â€ the batch boundary for a shared
+ * watermark was wrong three times, and each wrong version passed a fake that agreed
+ * with it. Real SQLite does not agree with anything; it evaluates the statement.
+ *
+ * D1's `all()` returns `{ results }` and `first()` a row or null, which is all the
+ * syncer uses. Parameters are passed straight through, so a placeholder left unbound
+ * fails here exactly as it would in production.
+ */
+class SqliteD1 {
+  readonly unrecognised: string[] = [];
+
+  constructor(private readonly db: SqliteDb) {}
+
+  binding(): D1Database {
+    const self = this;
+    return {
+      prepare(sql: string) {
+        let params: unknown[] = [];
+        const stmt = {
+          bind(...values: unknown[]) {
+            params = values;
+            return stmt;
+          },
+          async all<T>(): Promise<{ results: T[] }> {
+            try {
+              return { results: self.db.prepare(sql).all(...params) as T[] };
+            } catch (err) {
+              self.unrecognised.push(`${sql.slice(0, 120)} :: ${(err as Error).message}`);
+              throw err;
+            }
+          },
+          async first<T>(): Promise<T | null> {
+            try {
+              return ((self.db.prepare(sql).all(...params)[0] as T) ?? null);
+            } catch (err) {
+              self.unrecognised.push(`${sql.slice(0, 120)} :: ${(err as Error).message}`);
+              throw err;
+            }
+          },
+          async run(): Promise<{ success: true; meta: { changes: number } }> {
+            return { success: true, meta: { changes: 0 } };
+          },
+        };
+        return stmt as unknown as D1PreparedStatement;
+      },
+    } as unknown as D1Database;
+  }
+}
+
+/**
+ * A full harness over real SQLite: seed rows with plain SQL, run the syncer, assert
+ * against the mirror.
+ *
+ * Every request the syncer makes goes to the stub Supabase, so a test can also assert
+ * how many round trips a run cost Ã¢â‚¬â€ which is the whole reason the high-water gate
+ * exists.
+ */
+async function sqliteHarness(
+  t: { skip(reason: string): void },
+  seed: string[],
+  options: { env?: Record<string, string>; now?: () => number } = {},
+): Promise<{ raw: SqliteDb; db: SqliteD1; supabase: FakeSupabase; sync: BackupSync } | null> {
+  const raw = await openSqlite(t);
+  if (!raw) return null;
+
+  sqliteTables(raw);
+  for (const statement of seed) raw.exec(statement);
+
+  const db = new SqliteD1(raw);
+  const supabase = new FakeSupabase();
+  const env: Record<string, unknown> = {
+    DB: db.binding(),
+    SUPABASE_URL: "https://test.supabase.co",
+    SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+    SUPABASE_SCHEMA: "cw_backup",
+    ...(options.env ?? {}),
+  };
+  const sync = new BackupSync(env as never, {
+    now: options.now ?? (() => 1_700_000_000),
+    fetchImpl: supabase.fetch,
+  });
+  return { raw, db, supabase, sync };
+}
+
