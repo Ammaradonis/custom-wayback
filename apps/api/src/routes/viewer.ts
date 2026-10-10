@@ -32,7 +32,16 @@ export const viewerRouter = new Hono<{ Bindings: Env }>();
 
 viewerRouter.get("/:domain/:day/*", async (c) => {
   const { domain, day } = c.req.param();
-  const path = "/" + c.req.param("*");
+
+  // Hono 4 does not expose the wildcard segment via `c.req.param("*")` —
+  // it returns undefined, making every lookup produce `"/undefined"` and
+  // return "No capture found" for every page. Derive the path from the raw
+  // request URL instead, stripping the known `/a/:domain/:day` prefix.
+  const rawPath = new URL(c.req.url).pathname;
+  const prefix = `/a/${domain}/${day}`;
+  const path = rawPath.startsWith(prefix)
+    ? rawPath.slice(prefix.length) || "/"
+    : "/";
 
   // 1. Look up the snapshot ledger.
   const snap = await c.env.DB.prepare(
