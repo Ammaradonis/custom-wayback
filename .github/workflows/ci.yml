@@ -1,20 +1,16 @@
 name: CI
 
-# This workflow does NOT deploy. Deployment is handled by Cloudflare Workers
-# Builds (the Git integration configured on the `custom-wayback-api` Worker),
-# which triggers on every push to main and authenticates with its own token.
-# See the "Continuous deployment" section of the README for the build settings.
+# Every push to main deploys to Cloudflare Workers, from the `deploy` job below.
 #
-# The reason there is no deploy job here: `wrangler deploy` for this Worker
-# needs Workers Scripts/KV/R2 edit and Queues edit on the account, and the
-# hand-made CLOUDFLARE_API_TOKEN only ever carried D1. Every deploy attempt
-# failed at the asset upload with "No access to the specified resource". Rather
-# than depend on a token that has to be kept in sync with the bindings in
-# wrangler.toml, the deploy moved to Workers Builds, whose token Cloudflare
-# generates and scopes for the Worker itself.
+# The pipeline is deliberately ordered so nothing reaches production without
+# passing the gate: gitleaks → typecheck → build → tests → deploy.
 #
-# CI's job is therefore to be the gate Workers Builds is not: secret scanning,
-# typechecking and the real test suite.
+# Requires two repository secrets: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.
+# The token must carry, all Account-scoped: Workers Scripts (edit), Workers KV
+# Storage (edit), Workers R2 Storage (edit), Cloudflare Queues (edit) and
+# D1 (edit). Missing any of them fails a different step — Workers Scripts at the
+# asset upload ("No access to the specified resource"), Queues while configuring
+# the bindings in wrangler.toml — so it is worth checking all five when rotating.
 
 on:
   push:
@@ -84,12 +80,11 @@ jobs:
 
   # ── 3. Build ────────────────────────────────────────────────────────────────
   # This is also what compiles `packages/pipeline` and `packages/shared` to their
-  # `dist/` directories. Those outputs are load-bearing for deploys: `apps/api`
-  # imports both via their package.json `exports` (`./dist/index.js`), and
-  # `wrangler deploy` bundles from source with esbuild, so a missing dist is 17
-  # "Could not resolve @custom-wayback/..." errors. Workers Builds runs the same
-  # command (see the README), so this job is also the place a broken build
-  # surfaces first, before Cloudflare ever sees the commit.
+  # `dist/` directories, which `apps/api` imports via their package.json
+  # `exports` (`./dist/index.js`). The deploy job rebuilds them for itself (a
+  # fresh checkout has no dist and `pnpm install` does not run build scripts);
+  # this job exists so a broken build fails before a deploy is attempted, and to
+  # produce the web bundle the deploy job downloads.
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -112,11 +107,17 @@ jobs:
       - name: Build all packages
         run: pnpm turbo run build
 
+      - name: Upload web build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+          retention-days: 1
+
   # ── 4. Tests ────────────────────────────────────────────────────────────────
-  # The gate Workers Builds does not provide. Gated on `build` because
-  # `turbo run test` declares `dependsOn: ["^build"]`: the API's tests bundle the
-  # shipping module graph with the same esbuild that `wrangler deploy` uses,
-  # against the built workspace packages.
+  # Gated on `build` because `turbo run test` declares `dependsOn: ["^build"]`:
+  # the API's tests bundle the shipping module graph with the same esbuild that
+  # `wrangler deploy` uses, against the built workspace packages.
   test:
     name: Tests
     runs-on: ubuntu-latest
@@ -138,3 +139,100 @@ jobs:
 
       - name: Run tests
         run: pnpm turbo run test
+
+  # ── 5. Deploy to Cloudflare Workers (main branch only) ──────────────────────
+  # Runs only after the tests pass, so a commit that breaks the suite never
+  # reaches production.
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "9.14.4"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # A fresh checkout has no `packages/*/dist`, and `pnpm install` does not
+      # create them: the workspace packages' `build` scripts are only run by
+      # `pnpm turbo run build`. Without this step `wrangler deploy` fails with
+      # "Could not resolve @custom-wayback/shared" (and @custom-wayback/pipeline).
+      - name: Build workspace packages
+        run: pnpm turbo run build --filter=@custom-wayback/api...
+
+      - name: Download web build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+
+      # Migrations run before the deploy so the Worker never starts serving code
+      # that expects a column the remote D1 does not have yet.
+      - name: Apply D1 migrations
+        working-directory: apps/api
+        run: |
+          pnpm exec wrangler d1 migrations apply custom-wayback-ledger --remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # `[assets] directory = "../web/dist"` in wrangler.toml is resolved relative
+      # to apps/api, which is why this step is scoped there and why the web build
+      # is downloaded to exactly that path above.
+      - name: Deploy Worker
+        working-directory: apps/api
+        run: pnpm exec wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  # ── 6. Preview deploy (PRs only) ─────────────────────────────────────────────
+  # Deploys the `env.dev` Worker (`custom-wayback-api-dev`) using the same
+  # wrangler.toml, so a PR can be exercised without touching production.
+  preview:
+    name: Preview deploy
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "9.14.4"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Same reason as the deploy job: `wrangler deploy` needs packages/*/dist.
+      - name: Build workspace packages
+        run: pnpm turbo run build --filter=@custom-wayback/api...
+
+      - name: Download web build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+
+      - name: Deploy preview
+        working-directory: apps/api
+        run: pnpm exec wrangler deploy --env dev
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
