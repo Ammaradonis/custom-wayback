@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { auth, setToken } from "@/lib/api.js";
+import { FIELD_CLASS } from "@/hooks/useSites.js";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -25,15 +26,18 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center px-4 py-12">
+    <div className="flex min-h-dvh items-center justify-center bg-background px-4 py-12 text-foreground">
       <div className="w-full max-w-sm space-y-6">
         <div className="space-y-2 text-center">
           <h1 className="text-2xl font-semibold tracking-tight">Custom Wayback</h1>
           <p className="text-sm text-muted-foreground">Sign in to your account</p>
         </div>
-        <form onSubmit={handleSubmit} className="space-y-4">
+
+        <form onSubmit={handleSubmit} className="cw-panel space-y-4 p-5">
           <div className="space-y-2">
-            <label htmlFor="email" className="text-sm font-medium">Email</label>
+            <label htmlFor="email" className="cw-label">
+              Email
+            </label>
             <input
               id="email"
               type="email"
@@ -41,11 +45,13 @@ export default function LoginPage() {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-base ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className={FIELD_CLASS}
             />
           </div>
           <div className="space-y-2">
-            <label htmlFor="password" className="text-sm font-medium">Password</label>
+            <label htmlFor="password" className="cw-label">
+              Password
+            </label>
             <input
               id="password"
               type="password"
@@ -53,23 +59,25 @@ export default function LoginPage() {
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className={FIELD_CLASS}
             />
           </div>
           {error && (
-            <p className="text-sm text-red-400" role="alert">{error}</p>
+            <p
+              className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger-foreground"
+              role="alert"
+            >
+              {error}
+            </p>
           )}
-          <button
-            type="submit"
-            disabled={loading}
-            className="h-11 w-full rounded-md bg-accent px-4 py-2 text-sm font-semibold text-accent-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-          >
+          <button type="submit" disabled={loading} className="cw-btn cw-btn-primary w-full">
             {loading ? "Signing in…" : "Sign in"}
           </button>
         </form>
+
         <p className="text-center text-sm text-muted-foreground">
           No account?{" "}
-          <Link to="/register" className="text-accent hover:underline">
+          <Link to="/register" className="font-medium text-accent underline-offset-4 hover:underline">
             Register
           </Link>
         </p>

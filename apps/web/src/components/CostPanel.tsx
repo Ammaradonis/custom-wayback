@@ -13,8 +13,10 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { RefreshCw } from "lucide-react";
 import { ingest } from "@/lib/api.js";
-import { fmtMonthLabel, fmtMonthShort, fmtUsd } from "@/lib/format.js";
+import { fmtMonthShort, fmtUsd } from "@/lib/format.js";
+import { cn } from "@/lib/utils.js";
 import {
   BudgetBlock,
   DomainRow,
@@ -24,17 +26,12 @@ import {
   ThrottleBlock,
 } from "@/components/CostPanelParts.js";
 
-/** `"2026-01"` → `"2026-01-01"`, the value shape `<input type="month">` wants. */
-function monthToInputValue(month: string): string {
-  return /^\d{4}-\d{2}$/.test(month) ? `${month}-01` : "";
-}
-
 /** `YYYY-MM` for "now", in UTC — the ledger's month key. */
 function currentMonth(now: Date): string {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-/** The last 13 months, newest first, for the picker's datalist. */
+/** The last 13 months, newest first, for the picker. */
 function monthOptions(now: Date): string[] {
   const out: string[] = [];
   for (let i = 0; i < 13; i += 1) {
@@ -79,37 +76,54 @@ export function CostPanel() {
   });
 
   return (
-    <section className="rounded-lg border border-border p-4 space-y-4" aria-labelledby="cost-panel-h">
-      <div className="flex items-center justify-between gap-3">
-        <h2 id="cost-panel-h" className="text-base font-semibold">
+    <section className="cw-panel space-y-4 p-4" aria-labelledby="cost-panel-h">
+      {/* Header wraps instead of squeezing: at 320px the title, the month picker
+        * and the refresh button cannot share one row without the picker being
+        * crushed to an unusable width. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 id="cost-panel-h" className="flex-1 text-base font-semibold">
           Cost &amp; politeness
         </h2>
-        <input
-          type="month"
-          value={monthToInputValue(month)}
-          max={monthToInputValue(options[0] ?? month)}
-          list="cw-usage-months"
-          onChange={(e) => {
-            const next = e.target.value.slice(0, 7);
-            if (/^\d{4}-\d{2}$/.test(next)) setMonth(next);
-          }}
-          className="h-9 rounded-md border border-input bg-transparent px-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          aria-label="Usage month"
-        />
-        <datalist id="cw-usage-months">
-          {options.map((m) => (
-            <option key={m} value={monthToInputValue(m)}>
-              {fmtMonthShort(m)}
-            </option>
-          ))}
-        </datalist>
+
+        <button
+          type="button"
+          onClick={() => void refetch()}
+          className="cw-btn cw-btn-ghost cw-btn-icon"
+          aria-label="Refresh usage"
+          title="Refresh usage"
+        >
+          <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} aria-hidden />
+        </button>
+
+        {/* A closed list of the months the ledger can answer for. The previous
+          * `<input type="month">` leaned on a native picker whose contrast is
+          * the platform's to decide — on a light-mode OS it rendered against this
+          * app's dark canvas as an almost invisible control. */}
+        <div className="flex items-center gap-2">
+          <label htmlFor="usage-month" className="cw-label">
+            Month
+          </label>
+          <select
+            id="usage-month"
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+            className="cw-field w-auto min-w-[9rem] py-1 text-xs"
+            aria-label="Usage month"
+          >
+            {options.map((m) => (
+              <option key={m} value={m}>
+                {fmtMonthShort(m)}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {isPending && <Skeleton />}
 
       {isError && (
         <details className="space-y-2">
-          <summary className="text-sm text-muted-foreground cursor-pointer select-none">
+          <summary className="cursor-pointer text-sm text-muted-foreground select-none">
             Usage unavailable — {error instanceof Error ? error.message : "API not reachable"}
           </summary>
           <p className="text-xs text-muted-foreground">
@@ -117,8 +131,9 @@ export function CostPanel() {
             failure — not a stale number.
           </p>
           <button
+            type="button"
             onClick={() => void refetch()}
-            className="h-9 rounded-md border border-border px-3 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            className="cw-btn cw-btn-secondary"
           >
             Retry
           </button>
@@ -139,9 +154,7 @@ export function CostPanel() {
           </div>
 
           <div className="space-y-1">
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              By kind
-            </h3>
+            <h3 className="cw-label">By kind</h3>
             {data.byKind.length === 0 ? (
               <p className="text-sm text-muted-foreground">Nothing metered in this month.</p>
             ) : (
@@ -154,9 +167,7 @@ export function CostPanel() {
           </div>
 
           <div className="space-y-1">
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              By domain
-            </h3>
+            <h3 className="cw-label">By domain</h3>
             {data.byDomain.length === 0 ? (
               <p className="text-sm text-muted-foreground">No domains tracked yet.</p>
             ) : (

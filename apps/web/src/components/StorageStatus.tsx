@@ -10,6 +10,7 @@
  * silently when unsupported."
  */
 
+import { RefreshCw } from "lucide-react";
 import { useStorage } from "@/hooks/useStorage.js";
 
 function fmtBytes(n: number | null): string {
@@ -39,43 +40,46 @@ export function StorageStatus() {
     navigator.serviceWorker.controller !== null;
 
   return (
-    <details className="rounded-lg border border-border text-sm" open={false}>
-      <summary className="flex items-center justify-between px-4 py-3 cursor-pointer select-none list-none">
+    <details className="cw-panel text-sm">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 select-none">
         <span className="font-medium">Device cache</span>
-        <span className="text-xs text-muted-foreground">
+        <span className="text-xs tabular-nums text-muted-foreground">
           {hasSwController
             ? `${fmtBytes(archiveBytes)} / 25 MB`
             : "SW not active yet"}
         </span>
       </summary>
 
-      <div className="px-4 pb-4 space-y-3 border-t border-border pt-3">
-        <div className="flex items-center justify-between">
+      <div className="space-y-3 border-t border-border px-4 pt-3 pb-4">
+        <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-muted-foreground">
             Archive pages {hasSwController ? `(${archiveEntries} entries)` : ""}
           </span>
           <button
+            type="button"
             data-compact
             onClick={refresh}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            className="cw-btn cw-btn-ghost cw-btn-icon"
             aria-label="Refresh storage stats"
+            title="Refresh storage stats"
           >
-            ↺
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden />
           </button>
         </div>
 
         {/* Archive cache bar */}
         {hasSwController ? (
           <>
-            <div className="flex justify-between text-xs text-muted-foreground">
+            <div className="flex justify-between text-xs tabular-nums text-muted-foreground">
               <span>{fmtBytes(archiveBytes)}</span>
               <span>25 MB cap</span>
             </div>
-            <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
               <div
                 className="h-full rounded-full bg-accent transition-all duration-500"
                 style={{ width: `${archivePct}%` }}
                 role="progressbar"
+                aria-label="Archive cache used"
                 aria-valuenow={Math.round(archivePct)}
                 aria-valuemin={0}
                 aria-valuemax={100}
@@ -89,24 +93,31 @@ export function StorageStatus() {
         )}
 
         {/* Origin quota */}
-        <div className="flex justify-between text-xs text-muted-foreground">
+        <div className="flex justify-between text-xs tabular-nums text-muted-foreground">
           <span>Origin storage</span>
-          <span>{fmtBytes(usage)} / {fmtBytes(quota)}</span>
+          <span>
+            {fmtBytes(usage)} / {fmtBytes(quota)}
+          </span>
         </div>
 
         {/* Persistent storage */}
-        <div className="flex items-center justify-between text-xs">
+        <div className="flex items-center justify-between gap-3 text-xs">
           <span className="text-muted-foreground">
             Persistent:{" "}
-            <span className={isPersistent ? "text-green-400" : "text-yellow-400"}>
-              {isPersistent ? "✓ granted" : "not granted"}
+            <span
+              className={
+                isPersistent ? "font-medium text-success-foreground" : "font-medium text-warning-foreground"
+              }
+            >
+              {isPersistent ? "granted" : "not granted"}
             </span>
           </span>
           {!isPersistent && (
             <button
+              type="button"
               data-compact
               onClick={() => void requestPersist()}
-              className="ml-2 rounded px-2 py-1 bg-muted hover:bg-muted/80 text-foreground transition-colors text-xs"
+              className="cw-btn cw-btn-secondary h-8 min-h-8 px-2 text-xs"
             >
               Request
             </button>

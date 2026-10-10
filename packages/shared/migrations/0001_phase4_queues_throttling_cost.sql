@@ -12,7 +12,7 @@
 --     wait, so the UI can say "archive.org is throttling us, resuming in Ns" and
 --     the usage dashboard can price the backoff.
 --   * rate_limits                             -> fixed-window request throttling
---     for the API itself (per user, in D1, no extra service).
+--     for the API itself (per user, in D1, no extra service).;
 --> statement-breakpoint
 ALTER TABLE `ingests` ADD COLUMN `stage` text;--> statement-breakpoint
 ALTER TABLE `ingests` ADD COLUMN `cursor` integer DEFAULT 0 NOT NULL;--> statement-breakpoint

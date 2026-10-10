@@ -5,7 +5,7 @@
  *  POST /v1/auth/…      — registration, login, logout
  *  GET  /v1/domains/…   — domain management
  *  POST /v1/jobs        — start a crawl;  GET /v1/jobs/:id for status
- *  GET  /v1/usage       — cost monitoring dashboard payload
+ *  GET  /v1/jobs/usage  — cost monitoring dashboard payload
  *  GET  /a/:domain/…    — archive viewer (fast plane)
  *  anything else        — static assets (Workers Static Assets from apps/web/dist)
  *
@@ -30,6 +30,9 @@ import { ingestRouter } from "./routes/ingest.js";
 import { viewerRouter } from "./routes/viewer.js";
 import { manifestRouter } from "./routes/manifest.js";
 import { searchRouter } from "./routes/search.js";
+import { sharesRouter } from "./routes/shares.js";
+import { compareRouter } from "./routes/compare.js";
+import { exportRouter } from "./routes/export.js";
 import { purgeStaleCachedPages } from "./lib/r2.js";
 import { pruneRateLimits } from "./lib/ratelimit.js";
 import { handleIngestMessage, handleDeadLetter } from "./queue/ingest.js";
@@ -126,8 +129,80 @@ app.route("/v1/auth", authRouter);
 app.route("/v1/domains", domainsRouter);
 app.route("/v1/jobs", ingestRouter);
 app.route("/v1/search", searchRouter);
+app.route("/v1/shares", sharesRouter);
+app.route("/v1/compare", compareRouter);
+app.route("/v1/export", exportRouter);
 app.route("/v1", manifestRouter);
 app.route("/a", viewerRouter);
+
+// ── Share-link entry point ────────────────────────────────────────────────────
+//
+// `/s/<token>` is the URL a share link actually is. It resolves the token and
+// sends the browser to the snapshot route the token scopes. A redirect rather
+// than a bespoke view means the recipient lands on the ordinary viewer, with the
+// ordinary toolbar and day scrubber, and there is no second rendering path to
+// keep in step with the first.
+//
+// Registered before the asset fallthrough so it is not swallowed by the SPA
+// handler. It intentionally requires whatever access control fronts the app —
+// see the note in `routes/shares.ts`: a share link is a capability, not a way
+// around Cloudflare Access (plan.md §13).
+app.get("/s/:token", async (c) => {
+  const token = c.req.param("token");
+  if (!/^[0-9a-f]{32}$/.test(token)) {
+    return c.text("This share link is not valid.", 404);
+  }
+
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const tokenHash = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  const row = await c.env.DB.prepare(
+    `SELECT domain, month, day, url, expires_at, revoked_at FROM share_links WHERE token_hash = ?`,
+  )
+    .bind(tokenHash)
+    .first<{
+      domain: string;
+      month: string | null;
+      day: string | null;
+      url: string | null;
+      expires_at: number | null;
+      revoked_at: number | null;
+    }>();
+
+  if (!row) return c.text("This share link does not exist.", 404);
+  if (row.revoked_at !== null) return c.text("This share link has been revoked.", 410);
+
+  const now = Math.floor(Date.now() / 1000);
+  if (row.expires_at !== null && row.expires_at < now) {
+    return c.text("This share link has expired.", 410);
+  }
+
+  c.executionCtx.waitUntil(
+    c.env.DB.prepare(`UPDATE share_links SET view_count = view_count + 1, last_viewed_at = ? WHERE token_hash = ?`)
+      .bind(now, tokenHash)
+      .run()
+      .catch(() => void 0),
+  );
+
+  if (row.url && row.day) {
+    let path = "/";
+    try {
+      const parsed = new URL(row.url);
+      path = parsed.pathname.startsWith("/") ? parsed.pathname : `/${parsed.pathname}`;
+      if (parsed.search) path += `%3F${encodeURIComponent(parsed.search.slice(1))}`;
+    } catch {
+      // A malformed stored URL falls back to the month view below.
+      path = "";
+    }
+    if (path) return c.redirect(`/a/${row.domain}/${row.day}${path}`, 302);
+  }
+
+  // A month-scoped link opens the picker for that month.
+  const query = row.month ? `?domain=${encodeURIComponent(row.domain)}&month=${row.month}` : "";
+  return c.redirect(`/${query}`, 302);
+});
 
 // ── Static assets fallthrough ─────────────────────────────────────────────────
 

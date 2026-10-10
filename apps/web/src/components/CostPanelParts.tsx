@@ -13,10 +13,19 @@ import { fmtBytes, fmtCount, fmtDurationMs, fmtUsd } from "@/lib/format.js";
 
 // ── Budget state presentation ────────────────────────────────────────────────
 
+/**
+ * Budget state presentation.
+ *
+ * These were `text-amber-300` / `text-red-400` / `bg-amber-400` / `bg-red-500` —
+ * Tailwind's raw palette, picked for a dark background only. On the light theme
+ * the app now supports, amber-300 on white is about 1.6:1 and effectively
+ * invisible. The semantic `warning-*` / `danger-*` tokens carry a value for each
+ * theme and are contrast-checked (scripts/check-contrast.mjs).
+ */
 const BUDGET_STYLES: Record<BudgetStatus["state"], { bar: string; text: string }> = {
   ok: { bar: "bg-accent", text: "text-muted-foreground" },
-  warn: { bar: "bg-amber-400", text: "text-amber-300" },
-  exceeded: { bar: "bg-red-500", text: "text-red-400" },
+  warn: { bar: "bg-warning", text: "text-warning-foreground" },
+  exceeded: { bar: "bg-danger", text: "text-danger-foreground" },
   disabled: { bar: "bg-muted-foreground", text: "text-muted-foreground" },
 };
 
@@ -47,7 +56,7 @@ export function BudgetBlock({ budget }: { budget: BudgetStatus }) {
         </span>
       </div>
 
-      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
         <div
           className={`h-full rounded-full transition-all duration-500 ${style.bar}`}
           role="progressbar"
@@ -63,25 +72,25 @@ export function BudgetBlock({ budget }: { budget: BudgetStatus }) {
       {budget.state === "disabled" && (
         <p className="text-xs text-muted-foreground">
           No budget is set, so spend is not capped. Set{" "}
-          <code className="rounded bg-muted px-1">MONTHLY_BUDGET_USD</code> on the API worker to
+          <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px] text-foreground">MONTHLY_BUDGET_USD</code> on the API worker to
           enforce one.
         </p>
       )}
 
       {budget.state === "warn" && (
-        <p className="text-xs text-amber-300">
+        <p className="text-xs text-warning-foreground">
           {pct}% of the monthly budget is spent — {fmtUsd(budget.remainingUsd)} left.
         </p>
       )}
 
       {budget.state === "exceeded" && (
-        <p className="text-xs text-red-400">
+        <p className="text-xs text-danger-foreground">
           Budget exhausted: {fmtUsd(budget.spentUsd)} of {fmtUsd(budget.budgetUsd)}.
           {budget.crawlsBlocked && (
             <>
               {" "}
               <strong className="font-semibold">New crawls are refused</strong> until the month
-              rolls over or <code className="rounded bg-muted px-1">MONTHLY_BUDGET_USD</code> is
+              rolls over or <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px] text-foreground">MONTHLY_BUDGET_USD</code> is
               raised on the API worker.
             </>
           )}
@@ -107,7 +116,7 @@ function prettyKind(kind: string, unit: string): string {
 export function KindRow({ line }: { line: CostLine }) {
   const perUnit = line.units > 0 ? line.costUsd / line.units : 0;
   return (
-    <li className="py-1.5 space-y-0.5 text-sm">
+    <li className="space-y-0.5 border-b border-border py-1.5 text-sm last:border-b-0">
       <div className="flex items-baseline justify-between gap-3">
         <span className="truncate">{prettyKind(line.kind, line.unit)}</span>
         <span className="tabular-nums text-right">{fmtUsd(line.costUsd)}</span>
@@ -126,7 +135,7 @@ export function KindRow({ line }: { line: CostLine }) {
 export function DomainRow({ entry }: { entry: DomainCost }) {
   const label = entry.domain === "(shared)" ? "shared / platform" : entry.domain;
   return (
-    <li className="py-2 space-y-1 border-b border-border last:border-b-0">
+    <li className="space-y-1 border-b border-border py-2 last:border-b-0">
       <div className="flex items-baseline justify-between gap-3 text-sm">
         <span className="truncate font-medium">{label}</span>
         <span className="tabular-nums">{fmtUsd(entry.totalUsd)}</span>
@@ -161,7 +170,7 @@ export function QuotaBlock({ quota }: { quota: UsageReport["quota"] }) {
           {fmtCount(quota.used)} / {fmtCount(quota.limit)}
         </span>
       </div>
-      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
         <div
           className="h-full rounded-full bg-accent transition-all duration-500"
           role="progressbar"

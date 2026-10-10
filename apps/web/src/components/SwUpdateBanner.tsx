@@ -4,6 +4,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { useRegisterSW } from "virtual:pwa-register/react";
 
 export function SwUpdateBanner() {
@@ -47,23 +48,27 @@ export function SwUpdateBanner() {
     <div
       role="status"
       aria-live="polite"
-      className="fixed left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-full border border-border bg-background/95 backdrop-blur-sm px-4 py-2.5 shadow-2xl text-sm"
+      className="cw-overlay overlay-shadow fixed left-1/2 z-50 flex w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 items-center gap-2 rounded-full py-2 pr-2 pl-4 text-sm"
       style={{ bottom: "calc(1rem + var(--sai-bottom))" }}
     >
-      <span className="text-foreground">App updated</span>
+      <span className="min-w-0 flex-1 truncate">App updated</span>
       <button
+        type="button"
+        data-compact
         onClick={() => void updateServiceWorker(true)}
-        className="rounded-full bg-accent px-3 py-1 text-xs font-semibold text-accent-foreground hover:opacity-90 transition-opacity"
+        className="cw-btn cw-btn-primary h-8 min-h-8 flex-none rounded-full px-3 text-xs"
       >
         Reload
       </button>
       <button
+        type="button"
         data-compact
         onClick={() => setDismissed(true)}
         aria-label="Dismiss"
-        className="text-muted-foreground hover:text-foreground transition-colors w-6 h-6 flex items-center justify-center rounded-full"
+        title="Dismiss"
+        className="cw-btn cw-btn-ghost cw-btn-icon h-8 min-h-8 w-8 min-w-8 flex-none rounded-full"
       >
-        ✕
+        <X className="h-3.5 w-3.5" aria-hidden />
       </button>
     </div>
   );

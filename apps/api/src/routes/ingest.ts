@@ -140,7 +140,7 @@ ingestRouter.post("/", zValidator("json", StartIngestSchema), async (c) => {
     .run();
 
   // Enqueue the first bounded stage. Everything after this is the consumer's job.
-  const message: IngestQueueMessage = { ingestId: id, domain: domainRow.domain, month, stage: "survey", attempt: 0 };
+  const message: IngestQueueMessage = { ingestId: id, domain: domainRow.domain, month, stage: "survey", attempt: 0, enqueuedAt: now };
   await c.env.INGEST_QUEUE.send(message);
 
   return c.json(

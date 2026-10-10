@@ -6,6 +6,10 @@ const LoginPage = lazy(() => import("./routes/LoginPage.js"));
 const RegisterPage = lazy(() => import("./routes/RegisterPage.js"));
 const DashboardPage = lazy(() => import("./routes/DashboardPage.js"));
 const ViewerPage = lazy(() => import("./routes/ViewerPage.js"));
+// Phase 5 surfaces (plan.md §15) — lazy, so the shell route stays inside its
+// 60 KB gzipped budget (§2.3) and only the route that is opened pays for itself.
+const SearchPage = lazy(() => import("./routes/SearchPage.js"));
+const ComparePage = lazy(() => import("./routes/ComparePage.js"));
 
 function hasToken(): boolean {
   return Boolean(localStorage.getItem("cw_token"));
@@ -33,6 +37,22 @@ export default function App() {
             element={
               <PrivateRoute>
                 <DashboardPage />
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/search"
+            element={
+              <PrivateRoute>
+                <SearchPage />
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/compare"
+            element={
+              <PrivateRoute>
+                <ComparePage />
               </PrivateRoute>
             }
           />

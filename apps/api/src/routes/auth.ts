@@ -49,12 +49,68 @@ authRouter.use("/*", async (c, next) => {
 
 // ── Register ─────────────────────────────────────────────────────────────────
 
+/**
+ * Is self-registration open?
+ *
+ * The deployed Worker is reachable on a public `*.workers.dev` hostname, and
+ * `POST /v1/auth/register` previously accepted anyone. That is not a cosmetic
+ * issue: every account created can drive archive.org through the queue, fill D1
+ * and R2, and spend the monthly budget — one curl away from a stranger.
+ *
+ * So registration is **closed unless explicitly opened**. Set `ALLOWED_EMAILS` to
+ * a comma-separated list to permit exactly those addresses:
+ *
+ *   npx wrangler secret put ALLOWED_EMAILS      # or a plain var
+ *
+ * Default-closed is the right default here because the failure mode of forgetting
+ * to configure it is "nobody can sign up", which you notice immediately, whereas
+ * the failure mode of default-open is "somebody else is using your quota", which
+ * you may never notice.
+ *
+ * This does not replace Cloudflare Access (plan.md §13), which would gate the
+ * whole app rather than just sign-up. It removes the sharpest edge until that is
+ * in place.
+ */
+function registrationPolicy(env: { ALLOWED_EMAILS?: string }): { open: boolean; allowed: string[] } {
+  const raw = env.ALLOWED_EMAILS;
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return { open: false, allowed: [] };
+  }
+  // `*` is the explicit "yes, anyone" escape hatch, so an open instance is a
+  // deliberate choice rather than an unset variable.
+  if (raw.trim() === "*") return { open: true, allowed: [] };
+  const allowed = raw
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+  // A list of only separators (" , , ") permits nobody, not everybody.
+  return { open: false, allowed };
+}
+
 authRouter.post("/register", zValidator("json", RegisterSchema), async (c) => {
   const { email, password } = c.req.valid("json");
+
+  const policy = registrationPolicy(c.env);
+  const normalized = email.toLowerCase();
+  if (!policy.open && !policy.allowed.includes(normalized)) {
+    // Deliberately vague, and deliberately the same response whether the list is
+    // empty or the address is merely absent from it: a precise message would tell
+    // a stranger which addresses are permitted.
+    return c.json(
+      {
+        error: "registration_closed",
+        message:
+          "This instance is not accepting new accounts. The owner can allow an " +
+          "address by setting ALLOWED_EMAILS.",
+      },
+      403,
+    );
+  }
+
   const existingUser = await c.env.DB.prepare(
     "SELECT id FROM users WHERE email = ?",
   )
-    .bind(email.toLowerCase())
+    .bind(normalized)
     .first();
 
   if (existingUser) {
@@ -69,7 +125,7 @@ authRouter.post("/register", zValidator("json", RegisterSchema), async (c) => {
   await c.env.DB.prepare(
     "INSERT INTO users (id, email, password_hash, created_at) VALUES (?,?,?,?)",
   )
-    .bind(id, email.toLowerCase(), passwordHash, now)
+    .bind(id, normalized, passwordHash, now)
     .run();
 
   return c.json({ ok: true }, 201);

@@ -32,7 +32,7 @@
  * builtin. `env.d.ts` allows only the globals that exist in Node 22+ *and* in
  * Cloudflare Workers, so this module compiles in both runtimes. That constraint is
  * load-bearing rather than decorative: the local crawler and the Worker both import
- * it, and a `node:` import here would break the Worker bundle at deploy time.
+ * it, and a Node builtin import here would break the Worker bundle at deploy time.
  */
 
 import { RUNTIME_CSS, RUNTIME_SCRIPT, RUNTIME_SCRIPT_ID, RUNTIME_STYLE_ID } from './runtime.js';

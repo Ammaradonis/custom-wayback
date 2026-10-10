@@ -23,6 +23,7 @@ import { parseHTML } from "linkedom/worker";
 import type { Env } from "../env.js";
 import { CloudFetcher, BudgetExhausted, looksLikeWaybackError, recordThrottle } from "./fetch.js";
 import { rewriteHtml, extractReferences, assetPath, type PageRewriteResult } from "./rewrite.js";
+import { indexStatements } from "../lib/index-page.js";
 import {
   buildIdUrl,
   buildSurveyUrl,
@@ -104,6 +105,30 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/**
+ * The viewer-facing path for a page: its original URL path, query included.
+ *
+ * The viewer route is `/a/:domain/:day/*`, so whatever is stored in
+ * `snapshots.page_id` is appended to `/a/<domain>/<day>` verbatim. It must
+ * therefore be a real path on the original site *and* a suffix of the stored
+ * absolute URL, because a suffix match is how the viewer finds the row again.
+ *
+ * It used to be `domain/day/hash`, which satisfies neither: routes came out as
+ * `/a/example.com/2024-01-01/example.com/2024-01-01/df1d87514b593031` and no
+ * stored URL ends with that hash, so every route the manifest advertised 404'd.
+ */
+function pageIdFor(url: string): string {
+  try {
+    const parsed = new URL(url);
+    let path = parsed.pathname;
+    if (!path.startsWith("/")) path = `/${path}`;
+    const suffix = parsed.search ? `%3F${encodeURIComponent(parsed.search.slice(1))}` : "";
+    return `${path}${suffix}`;
+  } catch {
+    return "/";
+  }
 }
 
 /** SelectedPage mirrors the pipeline's shape; kept as a local alias for clarity. */
@@ -202,48 +227,6 @@ interface IngestRow {
   attempts: number;
   stage_attempts: number;
   day_index_json: string | null;
-}
-
-/**
- * The two statements that put one page into the search index.
- *
- * Both are needed because `snapshot_fts` is an FTS5 virtual table with no unique
- * constraint to upsert against, and `search_docs` is the ordinary table that
- * carries the bookkeeping. The delete is what makes a re-ingest replace rather
- * than duplicate: without it, crawling the same page twice would return it twice
- * in every search result forever.
- *
- * Returns an empty array — rather than throwing — when the page yielded no
- * indexable text, which is normal for a redirect stub or a JS-only shell.
- */
-function indexStatements(
-  env: Env,
-  doc: {
-    snapshotId: string;
-    domain: string;
-    url: string;
-    day: string;
-    ts: string;
-    html: string;
-    bytes: number;
-  },
-): D1PreparedStatement[] {
-  const text = extractIndexableText(doc.html);
-  if (text.length === 0) return [];
-  const title = extractTitle(doc.html);
-  const now = Math.floor(Date.now() / 1000);
-
-  return [
-    env.DB.prepare(`DELETE FROM snapshot_fts WHERE doc_id = ?`).bind(doc.snapshotId),
-    env.DB.prepare(
-      `INSERT INTO snapshot_fts (doc_id, url, title, text, domain, day, ts)
-       VALUES (?,?,?,?,?,?,?)`,
-    ).bind(doc.snapshotId, doc.url, title ?? "", text, doc.domain, doc.day, doc.ts),
-    env.DB.prepare(
-      `INSERT OR REPLACE INTO search_docs (snapshot_id, domain, url, day, title, bytes, indexed_at)
-       VALUES (?,?,?,?,?,?,?)`,
-    ).bind(doc.snapshotId, doc.domain, doc.url, doc.day, title, doc.bytes, now),
-  ];
 }
 
 /**
@@ -634,11 +617,26 @@ async function runPages(
     bytesStored += htmlBytes.byteLength;
 
     const snapshotId = (await sha256Hex(new TextEncoder().encode(`${msg.domain}|${page.url}|${page.day}`))).slice(0, 32);
+
+    // Digest of the bytes we are actually storing, plus the page title.
+    //
+    // Both exist so month-to-month comparison (plan.md §15 "Diff two months") can
+    // answer "did this page change?" with two indexed reads and **no R2 traffic**.
+    // Without them, asking that question costs one R2 Class B read per page per
+    // month — and silently fails for every page the post-serve purge has already
+    // deleted, which is most of them.
+    //
+    // The digest is of the *rewritten* HTML, so it answers the question the reader
+    // cares about ("would I see a difference?") rather than the one about
+    // archive.org's capture bytes, which can differ while rendering identically.
+    const contentDigest = (await sha256Hex(htmlBytes)).slice(0, 32);
+    const pageTitle = extractTitle(rewritten.html);
+
     await env.DB.prepare(
       `INSERT OR REPLACE INTO snapshots
          (id, ingest_id, domain, url, day, ts, status_code, mime, digest, bytes, r2_key, page_id,
-          served_at, purged_at, resolved_day, resolved_ts, delta_days)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, NULL, NULL, ?, ?, 0)`,
+          served_at, purged_at, resolved_day, resolved_ts, delta_days, content_digest, title)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, NULL, NULL, ?, ?, 0, ?, ?)`,
     )
       .bind(
         snapshotId,
@@ -652,9 +650,20 @@ async function runPages(
         page.digest,
         htmlBytes.byteLength,
         r2Key,
-        `${msg.domain}/${page.day}/${uhash}`,
+        // `page_id` is the *path* the viewer route already appends a domain and
+        // day to, so it must be the page's own URL path — not `domain/day/hash`.
+        //
+        // It was the latter, which produced routes like
+        // `/a/example.com/2024-01-01/example.com/2024-01-01/df1d87514b593031`:
+        // the segments doubled, and the trailing hash is not a path that any
+        // stored URL ends with, so the viewer's URL lookup could never match and
+        // every page in the manifest 404'd. The manifest was advertising routes
+        // that could not work, which is worse than advertising none.
+        pageIdFor(page.url),
         page.day,
         page.ts,
+        contentDigest,
+        pageTitle,
       )
       .run();
 

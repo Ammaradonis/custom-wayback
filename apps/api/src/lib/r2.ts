@@ -34,8 +34,22 @@ export function metaKey(domain: string, month: string): string {
 
 /**
  * Serve a cached page with read-through from R2.
+ *
  * Uses the Workers Cache API so subsequent requests are CDN hits (no R2 Class B).
  * Returns null if not found — caller falls through to on-demand fetch.
+ *
+ * ## Always returns a response the caller may modify
+ *
+ * A `Response` handed back by `cache.match()` has **immutable headers**, and so
+ * does one that has been through `HTMLRewriter`. Mutating either throws
+ * `TypeError: Can't modify immutable headers`, which in a Worker surfaces as a
+ * 500 — and only on the *cached* path, so it appears on the second visit to a
+ * page, never the first. That is the worst kind of bug to find in production.
+ *
+ * So this function never returns a cached object directly: it re-wraps the body
+ * and headers into a Response it owns. The cost is one header copy per request;
+ * the benefit is that the viewer can attach a CSP and toolbar headers without
+ * knowing or caring where the bytes came from.
  */
 export async function serveCachedPage(
   r2Key: string,
@@ -45,7 +59,7 @@ export async function serveCachedPage(
 ): Promise<Response | null> {
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
-  if (cached) return cached;
+  if (cached) return mutableCopy(cached);
 
   const obj = await env.STORAGE.get(r2Key);
   if (!obj) return null;
@@ -60,6 +74,21 @@ export async function serveCachedPage(
   // Store in CDN cache — fire-and-forget.
   ctx.waitUntil(cache.put(cacheKey, response.clone()));
   return response;
+}
+
+/**
+ * A Response whose headers the caller may edit.
+ *
+ * `new Response(body, { headers: new Headers(existing.headers) })` is the
+ * portable way to get there: copying the headers out of the immutable object
+ * produces a mutable one, and the body is a stream so this stays cheap.
+ */
+export function mutableCopy(response: Response): Response {
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: new Headers(response.headers),
+  });
 }
 
 // ── Write ────────────────────────────────────────────────────────────────────

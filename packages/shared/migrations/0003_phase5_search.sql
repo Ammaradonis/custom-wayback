@@ -27,7 +27,7 @@
 -- Search is always scoped to the domains a user owns, by joining `snapshots` (see
 -- `apps/api/src/lib/search.ts`), so this table needs no owner column of its own:
 -- ownership is a property of the domain, and duplicating it here would be a second
--- source of truth that could disagree.
+-- source of truth that could disagree.;
 --> statement-breakpoint
 CREATE VIRTUAL TABLE `snapshot_fts` USING fts5(
   doc_id UNINDEXED,

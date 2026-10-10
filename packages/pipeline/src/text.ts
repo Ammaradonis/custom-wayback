@@ -18,7 +18,7 @@
  * ## Why it is pure
  *
  * This module takes the *serialised* HTML and returns text. It has no DOM, no
- * `node:*`, no `HTMLRewriter` — so it is testable directly in Node and usable
+ * Node builtins, no `HTMLRewriter` — so it is testable directly in Node and usable
  * from both runtimes. The DOM-aware callers pass it `document.toString()`.
  *
  * The extractor is deliberately conservative: it prefers returning too little
@@ -154,9 +154,15 @@ export function extractIndexableText(html: string, maxChars = MAX_TEXT_CHARS): s
 
   body = squeezeWhitespace(decodeEntities(body));
 
-  // A page that yielded almost nothing was probably a redirect stub or a
-  // JS-only shell; indexing its two words would add noise, not recall.
-  if (body.length < 24) return "";
+  // A page that yielded nothing is a redirect stub, an image-only page, or a
+  // JS-only shell whose text never existed in the HTML. Indexing "" is pointless;
+  // indexing a couple of words is not.
+  //
+  // The threshold is deliberately low. An earlier version used 24 characters,
+  // which silently discarded genuinely short pages — a two-word "Contact Us" page
+  // is a real page someone may search for. This only filters what has no content
+  // at all.
+  if (body.length === 0) return "";
 
   return body.length > maxChars ? body.slice(0, maxChars) : body;
 }

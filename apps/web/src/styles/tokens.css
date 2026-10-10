@@ -1,0 +1,122 @@
+/* ════════════════════════════════════════════════════════════════════════════
+ * Colour tokens — the single source of truth for every surface in the app.
+ *
+ * WHY THIS FILE EXISTS
+ *
+ * The previous version of `index.css` declared these as plain custom properties
+ * inside `@layer base`:
+ *
+ *     @layer base { :root { --background: 222.2 84% 4.9%; … } }
+ *
+ * In Tailwind v4 the `@theme` block is what registers a design token under the
+ * `--color-*` namespace and thereby *creates the utilities*. A bare `:root`
+ * declaration creates nothing. So `bg-background`, `text-foreground`,
+ * `border-border`, `text-muted-foreground`, `bg-accent`, `ring-offset-background`,
+ * `fill-border` and every sibling were class names with **no CSS rule behind
+ * them**, in 246 places across 14 files. The stylesheet built green at 52 KB
+ * with zero semantic colour utilities in it.
+ *
+ * That is the whole bug report, mechanically:
+ *   · no `bg-background` on a surface  → panels fell through to the UA default
+ *   · no `border-input` on a <select>  → the control box had no outline at all
+ *   · no `bg-background` on the popover → the dropdown was transparent, so its
+ *     options showed through to whatever was behind it. Unreadable, not missing.
+ *   · no `text-foreground` anywhere    → text colour came from the UA, which is
+ *     chosen against the *system* theme and not against this app's dark canvas,
+ *     so on a light-mode OS the labels came out dark-on-dark.
+ *
+ * Two further decisions worth stating, because they are load-bearing:
+ *
+ * 1. **`light-dark()` instead of `.dark` overrides.** Each token carries both
+ *    themes and the browser resolves one from `color-scheme`. The app therefore
+ *    has a real light theme for the first time, follows the OS setting, and needs
+ *    no class-toggling JavaScript, no `dark:` variant on 246 call sites, and no
+ *    theme flash on load. `color-scheme` also drives native controls — pickers,
+ *    spinners, scrollbars and the `<select>` option list — so the option popup is
+ *    painted by the browser in the matching theme instead of always-light.
+ *
+ * 2. **Values are literals, not `var(--background)`.** Tailwind v4's `@theme`
+ *    inlines the value it is given. Handing it `var(--x)` would emit
+ *    `color: var(--x)`, and every `bg-accent/40` opacity modifier would then
+ *    resolve to `color-mix(in oklab, var(--x) 40%, transparent)` — which works,
+ *    but makes the emitted CSS harder to read and the tokens harder to grep.
+ *    Literals keep each utility self-contained.
+ *
+ * Every foreground/background pairing below is asserted by
+ * `scripts/check-contrast.mjs` against WCAG 2.1 AA. Run it after touching a value
+ * here; it parses this file directly, so it cannot drift from what ships.
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+@theme {
+  /* ── Canvas and surfaces ─────────────────────────────────────────────────
+   * `background` is the page. `card` is a raised panel (domain rows, cost panel
+   * sections). `popover` is an overlay surface — dialogs, sheets, the calendar
+   * popover — and is deliberately *lighter than the page* in dark mode and pure
+   * white in light mode, so an overlay reads as floating above the content
+   * rather than as a hole punched in it. */
+  --color-background: light-dark(hsl(0 0% 100%), hsl(222 47% 8%));
+  --color-foreground: light-dark(hsl(222 47% 11%), hsl(210 40% 98%));
+  --color-card: light-dark(hsl(210 40% 99%), hsl(222 42% 12%));
+  --color-card-foreground: light-dark(hsl(222 47% 11%), hsl(210 40% 98%));
+  --color-popover: light-dark(hsl(0 0% 100%), hsl(222 40% 15%));
+  --color-popover-foreground: light-dark(hsl(222 47% 11%), hsl(210 40% 98%));
+
+  /* ── Muted: secondary text and recessive fills ───────────────────────────
+   * `muted` is a fill (progress tracks, chips, skeletons). `muted-foreground` is
+   * text on the canvas/panel. Both are checked at 4.5:1 against `background`,
+   * `card` and `muted`, because helper text is exactly what reads as "invisible"
+   * when it is a shade too dim. */
+  --color-muted: light-dark(hsl(210 40% 94%), hsl(217 33% 21%));
+  --color-muted-foreground: light-dark(hsl(215 25% 35%), hsl(215 20% 78%));
+
+  /* ── Accent: the single interactive colour ───────────────────────────────
+   * Used three ways, so it has to clear three bars:
+   *   · `accent` as text/link on the page           → 4.5:1 vs background
+   *   · `accent` as a button fill with accent-fg    → 4.5:1 vs accent-foreground
+   *   · `accent/NN` as a tint / coverage dot        → perceptible, decorative
+   * `accent-foreground` is a *dark* navy in both themes on purpose: the accent
+   * is a mid-to-bright blue, so white-on-accent lands at 3.7:1 and fails AA for
+   * the 14px semibold button labels this app uses. Dark-on-blue is the pairing
+   * that actually passes, and it is stable across both themes. */
+  --color-accent: light-dark(hsl(217 91% 45%), hsl(213 94% 68%));
+  --color-accent-foreground: light-dark(hsl(210 40% 98%), hsl(222 47% 11%));
+  --color-accent-soft: light-dark(hsl(217 91% 45% / 0.12), hsl(213 94% 68% / 0.16));
+
+  /* ── Borders and inputs ──────────────────────────────────────────────────
+   * Light mode uses a *cool light grey* rather than the near-black that
+   * `--border: 217.2 32.6% 17.5%` implied, because in light mode a dark hairline
+   * on white reads as a hard rule. Dark mode keeps the border clearly lighter
+   * than both the page and the overlay, so control boxes have a visible edge. */
+  --color-border: light-dark(hsl(214 20% 80%), hsl(217 33% 30%));
+  --color-input: light-dark(hsl(214 20% 74%), hsl(217 33% 38%));
+  --color-ring: light-dark(hsl(217 91% 45%), hsl(213 94% 68%));
+
+  /* ── Status ──────────────────────────────────────────────────────────────
+   * `-foreground` variants are text colours and are checked at 4.5:1. The plain
+   * variants are fills/borders only; they are never used for type. */
+  --color-success: light-dark(hsl(142 72% 29%), hsl(142 69% 58%));
+  --color-success-foreground: light-dark(hsl(142 76% 24%), hsl(142 69% 66%));
+  --color-success-border: light-dark(hsl(142 72% 29% / 0.45), hsl(142 69% 58% / 0.5));
+  --color-warning: light-dark(hsl(32 95% 38%), hsl(43 96% 58%));
+  --color-warning-foreground: light-dark(hsl(26 90% 31%), hsl(43 96% 64%));
+  --color-warning-border: light-dark(hsl(32 95% 38% / 0.45), hsl(43 96% 58% / 0.5));
+  --color-danger: light-dark(hsl(0 72% 45%), hsl(0 91% 71%));
+  --color-danger-foreground: light-dark(hsl(0 74% 36%), hsl(0 94% 78%));
+  --color-danger-border: light-dark(hsl(0 72% 45% / 0.45), hsl(0 91% 71% / 0.5));
+
+  /* ── Diff surfaces ───────────────────────────────────────────────────────
+   * Word-level diff runs (`<ins>` / `<del>` in ComparePage) are tinted blocks of
+   * body text, so each needs a foreground readable *on its own tint* in both
+   * themes. The old values were `bg-green-500/20 text-green-200` — light-on-light
+   * the moment a light theme existed. `-foreground` is checked at 4.5:1 against
+   * its matching `-surface` in scripts/check-contrast.mjs. */
+  --color-diff-added-surface: light-dark(hsl(142 76% 92%), hsl(142 60% 20%));
+  --color-diff-added-foreground: light-dark(hsl(142 76% 21%), hsl(142 69% 82%));
+  --color-diff-removed-surface: light-dark(hsl(0 86% 95%), hsl(0 60% 24%));
+  --color-diff-removed-foreground: light-dark(hsl(0 74% 34%), hsl(0 94% 84%));
+
+  /* ── Radius ──────────────────────────────────────────────────────────────
+   * Registered so `rounded-md`, `rounded-lg`, `rounded-xl` etc. are all derived
+   * from one knob instead of Tailwind's defaults. */
+  --radius: 0.5rem;
+}

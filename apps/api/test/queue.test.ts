@@ -180,6 +180,16 @@ class FakeDb {
     return this.table("usage_ledger", ["id"]).rows;
   }
 
+  /** Rows the consumer wrote into the full-text index. */
+  searchDocs(): Row[] {
+    return this.table("search_docs", ["snapshot_id"]).rows;
+  }
+
+  /** Rows the consumer wrote into the FTS5 table itself. */
+  ftsRows(): Row[] {
+    return this.table("snapshot_fts", ["doc_id"]).rows;
+  }
+
   throttles(): Row[] {
     return this.table("throttle_events", ["id"]).rows;
   }
@@ -331,11 +341,41 @@ class FakeDb {
         const cols = [
           "id", "ingest_id", "domain", "url", "day", "ts", "status_code", "mime",
           "digest", "bytes", "r2_key", "page_id", "served_at", "purged_at",
-          "resolved_day", "resolved_ts", "delta_days",
+          "resolved_day", "resolved_ts", "delta_days", "content_digest", "title",
         ];
         const row: Row = {};
         cols.forEach((c, i) => (row[c] = params[i]));
         self.upsert("snapshots", ["id"], row);
+        return [row];
+      }
+
+      // ── search index (Phase 5) ───────────────────────────────────────────
+      //
+      // Modelled rather than ignored, so the tests can assert that a crawl
+      // actually produces index rows — and so a statement the consumer starts
+      // issuing without a handler here shows up as a failure instead of passing
+      // silently (which is the whole reason `unrecognised` exists).
+      if (/^DELETE FROM snapshot_fts WHERE doc_id = \?/i.test(s)) {
+        const table = self.table("snapshot_fts", ["doc_id"]);
+        for (let i = table.rows.length - 1; i >= 0; i--) {
+          if (table.rows[i]?.["doc_id"] === params[0]) table.rows.splice(i, 1);
+        }
+        return [];
+      }
+      if (/^INSERT INTO snapshot_fts/i.test(s)) {
+        const row: Row = {
+          doc_id: params[0], url: params[1], title: params[2], text: params[3],
+          domain: params[4], day: params[5], ts: params[6],
+        };
+        self.upsert("snapshot_fts", ["doc_id"], row);
+        return [row];
+      }
+      if (/^INSERT OR REPLACE INTO search_docs/i.test(s)) {
+        const row: Row = {
+          snapshot_id: params[0], domain: params[1], url: params[2], day: params[3],
+          title: params[4], bytes: params[5], indexed_at: params[6],
+        };
+        self.upsert("search_docs", ["snapshot_id"], row);
         return [row];
       }
 

@@ -16,6 +16,13 @@
  *    would show a confident, wrong number — stale cost numbers are worse than
  *    none.
  *
+ *    Search, compare and export joins them, for the same reason in a different
+ *    currency: a cached search result is a claim about what the archive contains,
+ *    a cached comparison is a claim about what changed, and a cached export row is
+ *    a claim about whether a bundle is finished and complete. All three can become
+ *    false the moment a crawl, a reindex or a purge lands, and a wrong answer about
+ *    the *contents* of the archive is worse than no answer at all.
+ *
  *  Everything else: network only.
  *
  * iOS Safari notes:
@@ -77,13 +84,20 @@ registerRoute(
 //     than no figure — it is a number the user will act on that may be minutes
 //     old. `/v1/jobs/usage` and `/v1/jobs/usage/limits` in particular must never
 //     be served from cache, and neither must a job's progress.
+//   * Search, compare and export are NetworkOnly for the same shape of reason:
+//     they describe the *contents* of the archive, and a crawl, a reindex or a
+//     purge invalidates that description without notice. A stale "no results" or
+//     "ready, complete bundle" would be believed.
 //   * Everything else is NetworkFirst with a short TTL, so a flaky train
 //     connection degrades to slightly-stale ledgers rather than a blank screen.
 registerRoute(
   ({ url }) =>
     url.pathname.startsWith("/v1/jobs") ||
     url.pathname.startsWith("/v1/usage") ||
-    url.pathname.startsWith("/v1/health"),
+    url.pathname.startsWith("/v1/health") ||
+    url.pathname.startsWith("/v1/search") ||
+    url.pathname.startsWith("/v1/compare") ||
+    url.pathname.startsWith("/v1/export"),
   new NetworkOnly(),
 );
 

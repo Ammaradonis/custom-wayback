@@ -8,7 +8,13 @@
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.sw.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.sw.json --noEmit",
     "preview": "vite preview",
-    "lint": "eslint src --ext .ts,.tsx"
+    "lint": "eslint src --ext .ts,.tsx",
+    "check:contrast": "node scripts/check-contrast.mjs",
+    "check:css": "node scripts/verify-css.mjs",
+    "check:visual": "node scripts/visual-check.mjs",
+    "check:mobile": "node scripts/mobile-check.mjs",
+    "test:e2e": "node scripts/e2e-calendar.mjs",
+    "verify:ui": "npm run check:contrast && npm run check:css && npm run check:visual && npm run test:e2e && npm run check:mobile"
   },
   "dependencies": {
     "@custom-wayback/shared": "workspace:*",
@@ -26,6 +32,7 @@
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.0.0-beta.8",
     "@types/react": "19.0.1",
     "@types/react-dom": "19.0.1",
     "@vitejs/plugin-react": "4.3.4",

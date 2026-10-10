@@ -17,6 +17,7 @@ import {
   isForeignBase,
   isStrippedMeta,
   scriptDisposition,
+  snapshotCsp,
   stubScriptHtml,
 } from "@custom-wayback/pipeline";
 import type { Env } from "../env.js";
@@ -79,6 +80,12 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
   if (response) {
     // Record served_at (fire-and-forget) so purge job can act.
     c.executionCtx.waitUntil(markServed(c.env, snap.id));
+    // `serveCachedPage` guarantees a response we own, so both of these are safe
+    // even when the bytes came straight out of the CDN cache. Attaching the §10
+    // policy here matters: without it the R2 path served archived pages with no
+    // content policy at all, while the on-demand path had one — the same URL
+    // getting a different security posture depending on which path served it.
+    response.headers.set("Content-Security-Policy", snapshotCsp());
     injectToolbarHeaders(response, snap.resolved_day, snap.delta_days);
     return response;
   }

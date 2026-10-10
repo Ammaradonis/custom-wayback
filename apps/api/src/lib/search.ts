@@ -99,9 +99,13 @@ export function buildFtsExpression(raw: string): string {
   const terms = raw
     .split(/[\s,;]+/)
     .map((t) => t.trim())
-    // Strip characters that carry meaning in FTS5 syntax. They are not searchable
-    // content, and leaving them in would let input reach the parser.
-    .map((t) => t.replace(/["'*(){}:^~[\]-]/g, ""))
+    // Keep letters, numbers, and the few marks that appear inside real words
+    // (C++, AT&T, 3.5mm, mother-in-law, don't). Everything else goes, which is
+    // what stops `(`/`"`/`*`/`:` from reaching the FTS5 parser.
+    .map((t) => t.replace(/[^\p{L}\p{N}+&.'_-]/gu, ""))
+    // Leading and trailing marks are noise: `!!!` and `***` reduce to nothing and
+    // are dropped rather than searched for.
+    .map((t) => t.replace(/^[.'_-]+|[.'_-]+$/g, ""))
     .filter((t) => t.length > 0)
     .slice(0, MAX_TERMS)
     .map((t) => (t.length > MAX_TERM_LENGTH ? t.slice(0, MAX_TERM_LENGTH) : t));

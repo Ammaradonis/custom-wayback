@@ -1,0 +1,9 @@
+﻿{
+    "email":  "p5-1791593498@example.test",
+    "password":  "correct-horse-battery-staple-9",
+    "token":  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMU00SE1QSko5QlAyVjZUTTRTS0c1MkMzMSIsImp0aSI6IjAxTTRITVBQQzgzRjFDTU1IUjhCNkhIM1dEIiwiaWF0IjoxNzkxNTkzNTAzLCJleHAiOjE3OTIxOTgzMDN9.xj-kU5PXm3m-WsyqGEDnF3vCodrKlLFUbgCLLKmRrwM",
+    "domain":  "example.com",
+    "domainId":  "01M4HMPPF5H84Y3NYTD8RF4Z41",
+    "month":  "2024-01",
+    "compareMonth":  "2024-02"
+}

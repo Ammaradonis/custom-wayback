@@ -1,12 +1,29 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#0f172a" />
+
+    <!--
+      Both themes are first-class. This is declared in the markup, not only in
+      CSS, so the browser paints the canvas and any native control in the right
+      scheme on the very first frame — before the stylesheet has loaded and long
+      before React mounts. Without it there is a white flash on a dark-mode device
+      and the initial scrollbar and form controls come out light.
+
+      `light dark` means "follow the OS preference", which the CSS tokens in
+      src/styles/tokens.css answer with a value for each scheme via light-dark().
+    -->
+    <meta name="color-scheme" content="light dark" />
+
+    <!-- Matched to --color-background in both schemes so the mobile browser
+         chrome and the PWA splash do not contrast with the page. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c1220" />
+
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Custom Wayback</title>

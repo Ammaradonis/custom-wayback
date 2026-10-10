@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Colour tokens live in their own file so `scripts/check-contrast.mjs` can parse
+ * exactly the block that ships. See that file for why it is `@theme` and not
+ * `@layer base` — that distinction is the bug this rewrite fixes. */
+@import "./styles/tokens.css";
+
 /* ── Tailwind v4 custom utilities ──────────────────────────────────────────── */
 
 @utility scrollbar-none {
@@ -9,7 +14,20 @@
   }
 }
 
-/* ── Radix UI animation helpers (used by Dialog/Popover) ───────────────────── */
+/* pb-safe: padding-bottom that includes the device safe-area. */
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Raise an overlay surface above the page with a real shadow in light mode and a
+ * rim highlight in dark mode, where a drop shadow on a dark canvas is invisible. */
+@utility overlay-shadow {
+  box-shadow:
+    0 24px 48px -12px rgb(0 0 0 / 0.45),
+    0 0 0 1px light-dark(transparent, hsl(217 33% 30% / 0.6));
+}
+
+/* ── Radix UI animation helpers (used by Dialog/Popover/Sheet) ─────────────── */
 
 @keyframes cw-fade-in {
   from { opacity: 0; }
@@ -20,12 +38,12 @@
   to   { opacity: 0; }
 }
 @keyframes cw-zoom-in {
-  from { opacity: 0; transform: scale(0.95); }
+  from { opacity: 0; transform: scale(0.96); }
   to   { opacity: 1; transform: scale(1); }
 }
 @keyframes cw-zoom-out {
   from { opacity: 1; transform: scale(1); }
-  to   { opacity: 0; transform: scale(0.95); }
+  to   { opacity: 0; transform: scale(0.96); }
 }
 @keyframes cw-slide-in-from-bottom {
   from { transform: translateY(100%); }
@@ -36,7 +54,7 @@
   to   { transform: translateY(100%); }
 }
 
-/* Tailwind v4 @utility shorthand for the data-[state=…] animation classes */
+/* Tailwind v4 @utility shorthand for the data-[state=…] animation classes. */
 @utility animate-in {
   animation-fill-mode: both;
 }
@@ -77,68 +95,333 @@
   animation-duration: 200ms;
 }
 
-/* pb-safe: padding-bottom that includes the device safe-area */
-@utility pb-safe {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+/* Respect a reduced-motion preference for the enter/exit animations. Radix state
+ * changes still need to complete, so these are shortened rather than removed. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-in,
+  .animate-out,
+  [data-state="open"],
+  [data-state="closed"] {
+    animation-duration: 1ms !important;
+  }
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * Component classes
+ *
+ * These used to be string constants in `hooks/useSites.ts` (FIELD_CLASS, …) and
+ * duplicated inline everywhere else. Promoting them to real classes means the
+ * control styling — which is precisely what was invisible — is defined once, in
+ * CSS, where it can be reasoned about and audited, instead of being concatenated
+ * at each call site. Call sites keep using Tailwind utilities for layout.
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+@layer components {
+  /* ── Native form controls ──────────────────────────────────────────────
+   * The contrast bug in the report lived here: with `border-input` and
+   * `bg-background` unemitted, a <select> fell back to the UA look — a control
+   * with no border and, on a light-mode OS, dark-on-dark option text.
+   *
+   * `color-scheme` is now set on :root (see base layer), which makes the browser
+   * paint the option list, spinners, scrollbars and pickers in the matching
+   * theme. The explicit background/colour on <option> is a belt-and-braces
+   * measure: Windows Chrome renders the option popup as a native OS menu that
+   * does not always follow the page's color-scheme.
+   */
+  .cw-field {
+    display: block;
+    width: 100%;
+    min-height: 2.75rem; /* 44px touch target */
+    border-radius: calc(var(--radius) - 2px);
+    border: 1px solid var(--color-input);
+    background-color: var(--color-card);
+    color: var(--color-foreground);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .cw-field::placeholder {
+    color: var(--color-muted-foreground);
+    /* Placeholders are hints, not content — 4.5:1 is not required, but they must
+     * not be so faint that the field looks empty-and-broken. */
+    opacity: 1;
+  }
+
+  /* A visible border on hover is what makes a control look like a control. */
+  .cw-field:hover:not(:disabled):not(:focus) {
+    border-color: var(--color-ring);
+  }
+
+  .cw-field:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-color: var(--color-ring);
+  }
+
+  .cw-field:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  /* Native select: strip the platform chrome, then draw our own caret.
+   *
+   * The caret has to be an inline SVG data URI — a background image cannot use
+   * `currentColor`, and a CSS triangle cannot be themed. `light-dark()` picks
+   * between two encoded strokes, which is why it is used here rather than a
+   * `theme()` lookup.
+   *
+   * The stroke is `--color-muted-foreground` in each scheme, NOT white: the first
+   * version hardcoded `%23e2e8f0`, which is invisible against the light theme's
+   * near-white field fill — the same class of bug as the one being fixed. */
+  select.cw-field {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 2.25rem;
+    cursor: pointer;
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+    background-size: 1rem 1rem;
+    /* The two encoded strokes are --color-muted-foreground per scheme:
+     * light #435670 = hsl(215 25% 35%), dark #bcc5d2 = hsl(215 20% 78%). */
+    background-image: light-dark(
+      url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23435670' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"),
+      url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23bcc5d2' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")
+    );
+  }
+
+  /* Options must carry their own colours: the popup is an OS surface. */
+  select.cw-field > option {
+    background-color: var(--color-popover);
+    color: var(--color-popover-foreground);
+  }
+
+  /* ── Buttons ──────────────────────────────────────────────────────────── */
+  .cw-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    min-height: 2.75rem; /* 44px */
+    border-radius: calc(var(--radius) - 2px);
+    border: 1px solid transparent;
+    padding: 0 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+
+  .cw-btn:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .cw-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* Primary — the accent fill. `accent-foreground` is a dark navy in both
+   * themes because white-on-mid-blue only reaches 3.7:1 and fails AA. */
+  .cw-btn-primary {
+    background-color: var(--color-accent);
+    color: var(--color-accent-foreground);
+    font-weight: 600;
+  }
+  .cw-btn-primary:hover:not(:disabled) {
+    background-color: color-mix(in oklab, var(--color-accent) 88%, var(--color-foreground));
+  }
+
+  /* Secondary — a bordered surface button. */
+  .cw-btn-secondary {
+    background-color: var(--color-card);
+    border-color: var(--color-border);
+    color: var(--color-foreground);
+  }
+  .cw-btn-secondary:hover:not(:disabled) {
+    border-color: var(--color-ring);
+    background-color: var(--color-muted);
+  }
+
+  /* Ghost — toolbar and inline actions. */
+  .cw-btn-ghost {
+    background-color: transparent;
+    color: var(--color-muted-foreground);
+  }
+  .cw-btn-ghost:hover:not(:disabled) {
+    background-color: var(--color-muted);
+    color: var(--color-foreground);
+  }
+
+  /* Square icon button, 36px inside dense toolbars (marked data-compact). */
+  .cw-btn-icon {
+    padding: 0;
+    width: 2.25rem;
+    min-width: 2.25rem;
+    min-height: 2.25rem;
+  }
+
+  /* Danger — destructive text actions. */
+  .cw-btn-danger {
+    background-color: transparent;
+    color: var(--color-danger-foreground);
+  }
+  .cw-btn-danger:hover:not(:disabled) {
+    background-color: color-mix(in oklab, var(--color-danger) 16%, transparent);
+    color: var(--color-danger-foreground);
+  }
+
+  /* ── Surfaces ─────────────────────────────────────────────────────────── */
+  .cw-panel {
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    background-color: var(--color-card);
+    color: var(--color-card-foreground);
+  }
+
+  /* An overlay: dialog, bottom sheet, popover. Distinct from the page so it
+   * reads as floating above the content. */
+  .cw-overlay {
+    background-color: var(--color-popover);
+    color: var(--color-popover-foreground);
+    border: 1px solid var(--color-border);
+  }
+
+  /* Small uppercase field/stat labels. */
+  .cw-label {
+    display: block;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-muted-foreground);
+  }
+
+  /* ── Segmented control (mobile/desktop view switch in the calendar) ───── */
+  .cw-segment {
+    display: inline-flex;
+    padding: 2px;
+    gap: 2px;
+    border-radius: calc(var(--radius) + 2px);
+    background-color: var(--color-muted);
+    border: 1px solid var(--color-border);
+  }
+  .cw-segment > button {
+    border-radius: var(--radius);
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-muted-foreground);
+    cursor: pointer;
+    transition: background-color 120ms ease, color 120ms ease;
+  }
+  .cw-segment > button:hover {
+    color: var(--color-foreground);
+  }
+  .cw-segment > button[aria-pressed="true"] {
+    background-color: var(--color-accent);
+    color: var(--color-accent-foreground);
+    font-weight: 600;
+  }
+  .cw-segment > button:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * Base layer
+ * ════════════════════════════════════════════════════════════════════════════ */
 
 @layer base {
   :root {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --accent: 217.2 91.2% 59.8%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --radius: 0.5rem;
-    /* Safe area insets */
+    /* Drives light-dark() resolution AND native control theming: option lists,
+     * date pickers, spinners, scrollbars and the canvas colour behind the page.
+     * `light dark` means "follow the OS", and every token above has a value for
+     * both, so there is no unstyled state. */
+    color-scheme: light dark;
+
+    /* Safe-area insets, read by the pb-safe utility and inline header padding. */
     --sai-top: env(safe-area-inset-top, 0px);
     --sai-bottom: env(safe-area-inset-bottom, 0px);
     --sai-left: env(safe-area-inset-left, 0px);
     --sai-right: env(safe-area-inset-right, 0px);
   }
-}
 
-@layer base {
   * {
     box-sizing: border-box;
+    /* Tailwind v4's default border colour is `currentColor`, so a bare `border`
+     * inherits the text colour — a near-white rule on a dark canvas. Point it at
+     * the border token instead so every bordered element is themed by default. */
+    border-color: var(--color-border);
+    /* Tailwind's ring/outline utilities default the offset colour to #fff, which
+     * on a dark canvas paints a white halo around every focus ring. Point it at
+     * the page colour so `ring-offset-*` is theme-correct by default. */
+    --tw-ring-offset-color: var(--color-background);
   }
 
-  /* Kill 300ms tap delay on interactive controls without breaking native
-   * select pickers on iOS (which need touch-action: auto). */
+  /* Kill the 300ms tap delay on interactive controls without breaking the native
+   * select picker on iOS, which needs touch-action: auto. */
   button,
   a,
   [role="button"],
   label,
   input,
+  select,
   textarea {
     touch-action: manipulation;
   }
 
+  html {
+    /* The canvas behind the page — matters for overscroll on iOS and for the
+     * area behind a bottom sheet. */
+    background-color: var(--color-background);
+  }
+
   body {
-    background-color: hsl(var(--background));
-    color: hsl(var(--foreground));
+    margin: 0;
+    background-color: var(--color-background);
+    color: var(--color-foreground);
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
       Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     min-height: 100dvh;
     min-height: -webkit-fill-available;
   }
 
-  /* Minimum touch target size (44×44 px).
-   *
-   * Applied only to interactive controls that are NOT already constrained by
-   * an explicit size utility. We use a data attribute opt-out (`data-compact`)
-   * for controls that deliberately live inside tight layouts — e.g. the
-   * calendar day grid (h-10 = 40 px cells) and icon-only toolbar buttons
-   * that live inside a fixed-height header.
-   *
-   * The calendar and toolbar set their own touch-target sizes via padding.
-   */
+  /* Type colour must never be inherited from the UA stylesheet, which picks
+   * against the *system* theme and produced dark-on-dark labels in the bug. */
+  h1, h2, h3, h4, h5, h6 {
+    color: var(--color-foreground);
+  }
+
+  /* A focus ring on everything that can receive focus, themed and visible.
+   * `:focus-visible` only, so pointer users never see it. */
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  /* Selection colour, so highlighted text is readable rather than UA-blue. */
+  ::selection {
+    background-color: var(--color-accent);
+    color: var(--color-accent-foreground);
+  }
+
+  /* Links inside prose-ish surfaces default to the accent. */
+  a {
+    color: inherit;
+  }
+
+  /* Minimum touch target (44×44 px), applied only to interactive controls that
+   * are not already constrained by an explicit size. `data-compact` opts out for
+   * controls that live inside tight layouts — the calendar day grid and the
+   * icon-only toolbar buttons, which set their own sizes. */
   button:not([data-compact]),
   a:not([data-compact]),
   [role="button"]:not([data-compact]) {

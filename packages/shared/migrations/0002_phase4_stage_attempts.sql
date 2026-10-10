@@ -15,6 +15,6 @@
 -- resets every time the stage advances, so the ceiling in
 -- `apps/api/src/queue/ingest.ts` bounds "attempts at one stage" — which is what
 -- it was always meant to bound, and what stops a genuinely stuck job without
--- capping a working one.
+-- capping a working one.;
 --> statement-breakpoint
 ALTER TABLE `ingests` ADD COLUMN `stage_attempts` integer DEFAULT 0 NOT NULL;

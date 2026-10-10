@@ -9,9 +9,22 @@
  * So: serialized per host, never faster than `minDelayMs`, exponential backoff with
  * jitter on 429/503, and a breaker that pauses a host rather than retrying into a wall.
  *
+ * The backoff math and breaker constants are delegated to `@custom-wayback/shared/policy`
+ * — the same module the cloud queue consumer uses — so the two crawl paths cannot
+ * drift into behaving differently toward archive.org (plan.md §12, §16).
+ *
  * Note for maintainers: no constructor parameter properties anywhere in this package.
  * Node's strip-only TypeScript mode rejects them at runtime.
  */
+
+import {
+  applySuccess,
+  applyThrottle,
+  breakerWaitSeconds,
+  emptyThrottleLedger,
+  isThrottleStatus,
+  type ThrottleLedger,
+} from '@custom-wayback/shared';
 
 export class ThrottleError extends Error {
   readonly status: number;
@@ -36,8 +49,8 @@ interface HostState {
   /** Resolves when the next request to this host may start. */
   tail: Promise<void>;
   lastStart: number;
-  consecutiveThrottles: number;
-  openUntil: number;
+  /** Durable throttle state per host: consecutive count + breaker deadline. */
+  ledger: ThrottleLedger;
 }
 
 export interface PolitenessOptions {
@@ -80,7 +93,7 @@ export class PolitenessGate {
   private state(host: string): HostState {
     let s = this.hosts.get(host);
     if (!s) {
-      s = { tail: Promise.resolve(), lastStart: 0, consecutiveThrottles: 0, openUntil: 0 };
+      s = { tail: Promise.resolve(), lastStart: 0, ledger: emptyThrottleLedger() };
       this.hosts.set(host, s);
     }
     return s;
@@ -94,10 +107,11 @@ export class PolitenessGate {
     s.tail = new Promise<void>((r) => (release = r));
     await prior;
 
-    const now = Date.now();
-    if (s.openUntil > now) {
-      const waitMs = s.openUntil - now;
-      this.opts.onBreaker?.({ host, waitMs, consecutive: s.consecutiveThrottles });
+    const now = Math.floor(Date.now() / 1000);
+    const waitSecs = breakerWaitSeconds(s.ledger, now);
+    if (waitSecs > 0) {
+      const waitMs = waitSecs * 1000;
+      this.opts.onBreaker?.({ host, waitMs, consecutive: s.ledger.consecutive });
       await sleep(waitMs);
     }
 
@@ -108,29 +122,32 @@ export class PolitenessGate {
     release();
   }
 
-  /** Note a throttle; returns how long the caller should wait before retrying. */
+  /**
+   * Note a throttle response; returns how long the caller should wait before retrying.
+   *
+   * Delegates to the shared policy so backoff math is identical to the cloud consumer
+   * (plan.md §12, §16).
+   */
   noteThrottle(host: string, url: string, status: number, attempt: number): number {
     const s = this.state(host);
-    s.consecutiveThrottles += 1;
-    // Exponential backoff with full jitter, biased upward so we actually back off.
-    const base = Math.min(60_000, 1_500 * 2 ** (s.consecutiveThrottles - 1));
-    const waitMs = Math.round(base / 2 + Math.random() * (base / 2));
-    if (s.consecutiveThrottles >= this.opts.breakerThreshold) {
-      s.openUntil = Date.now() + this.opts.breakerCooldownMs;
-      s.consecutiveThrottles = 0;
-    }
-    this.opts.onThrottle?.({ url, status, attempt, waitMs });
-    return waitMs;
+    const now = Math.floor(Date.now() / 1000);
+    const outcome = applyThrottle(s.ledger, now, this.opts.breakerCooldownMs);
+    s.ledger = outcome.state;
+    this.opts.onThrottle?.({ url, status, attempt, waitMs: outcome.waitMs });
+    return outcome.waitMs;
   }
 
   noteSuccess(host: string): void {
-    this.state(host).consecutiveThrottles = 0;
+    const s = this.state(host);
+    s.ledger = applySuccess(s.ledger);
   }
 
   /** Hosts currently in breaker cooldown. */
   get openBreakers(): string[] {
-    const now = Date.now();
-    return [...this.hosts.entries()].filter(([, s]) => s.openUntil > now).map(([h]) => h);
+    const now = Math.floor(Date.now() / 1000);
+    return [...this.hosts.entries()]
+      .filter(([, s]) => breakerWaitSeconds(s.ledger, now) > 0)
+      .map(([h]) => h);
   }
 }
 
@@ -190,7 +207,7 @@ export class PoliteFetcher {
           },
         });
 
-        if (res.status === 429 || res.status === 503 || res.status === 502) {
+        if (isThrottleStatus(res.status)) {
           lastStatus = res.status;
           this.stats.throttled += 1;
           const waitMs = this.gate.noteThrottle(host, url, res.status, attempt);

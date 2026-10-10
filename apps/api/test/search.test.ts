@@ -37,18 +37,27 @@ test("buildFtsExpression quotes every term so input cannot become FTS5 syntax", 
 });
 
 test("buildFtsExpression neutralises FTS5 operators and column filters", () => {
-  // `OR` is an FTS5 operator; the user meant the word.
+  // `OR` is an FTS5 operator; the user meant the word. Because every term is
+  // wrapped in a string literal, an operator word is just a word — which is the
+  // correct behaviour and the reason operator words are NOT stripped from input.
   assert.equal(buildFtsExpression("cats OR dogs"), '"cats"* AND "OR"* AND "dogs"*');
   // `text:` is a column filter. Stripping the colon stops input addressing columns.
   const columnAttack = buildFtsExpression("text:secret");
   assert.ok(!columnAttack.includes("text:"), `column filter survived: ${columnAttack}`);
-  // `NOT`, `NEAR`, `^` and braces all carry meaning in FTS5.
-  for (const hostile of ["NOT x", "a NEAR b", "^start", "{col} : v", "a - b", "a ~ b"]) {
+  assert.equal(columnAttack, '"textsecret"*', "the colon is removed, the word is kept");
+  for (const hostile of ["NOT x", "a NEAR b", "^start", "{col} : v", "a - b"]) {
     const built = buildFtsExpression(hostile);
-    assert.ok(
-      !/[{^~]|NEAR/.test(built),
-      `operator survived in ${JSON.stringify(hostile)}: ${built}`,
+    // No *unquoted* operator or bracket may survive. A quoted "NEAR" is a literal
+    // word and is safe; a bare NEAR would be an operator.
+    // The structural check is the meaningful one: no character that carries
+    // meaning outside a string literal may survive unquoted. Operator *words* are
+    // deliberately kept, because inside a string literal they are just words.
+    assert.equal(
+      (built.match(/(?<!")"(?!")/g) ?? []).length % 2,
+      0,
+      `unbalanced quotes in ${built}`,
     );
+    assert.ok(!/[{^~[\]]/.test(built), `structural character survived in ${JSON.stringify(hostile)}: ${built}`);
   }
 });
 
@@ -135,12 +144,18 @@ test("extractIndexableText keeps prose and drops script, style and markup", () =
 });
 
 test("extractIndexableText separates adjacent block elements", () => {
-  // `<li>a</li><li>b</li>` must not fuse into the word "ab".
+  // `<li>a</li><li>b</li>` must not fuse into the word "ab" — a fused word is one
+  // that appears nowhere on the page, which is how a search index starts lying.
   const text = extractIndexableText("<ul><li>Alpha</li><li>Beta</li></ul><div>Gamma</div>");
-  assert.ok(/\bAlpha\b/.test(text) && /\bBeta\b/.test(text), text);
+  assert.equal(text, "Alpha Beta Gamma", `unexpected extraction: ${JSON.stringify(text)}`);
 
-  const fused = extractIndexableText("<h2>Contact</h2><p>Us</p>");
-  assert.ok(!/ContactUs/.test(fused), `block boundary lost: ${fused}`);
+  // A genuinely short page still indexes: "Contact Us" is a real page someone may
+  // search for, and an earlier threshold silently dropped it.
+  assert.equal(extractIndexableText("<h2>Contact</h2><p>Us</p>"), "Contact Us");
+
+  const fused = extractIndexableText("<h2>Contact us today</h2><p>for a quote</p>");
+  assert.equal(fused, "Contact us today for a quote", `block boundary lost: ${JSON.stringify(fused)}`);
+  assert.ok(!fused.includes("todayfor"), "adjacent blocks must not fuse into one token");
 });
 
 test("extractIndexableText returns empty for shells that would only add noise", () => {

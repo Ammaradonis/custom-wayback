@@ -1,66 +1,41 @@
 /**
- * Password hashing for the Workers runtime.
+ * PBKDF2-HMAC-SHA-256 iteration count.
  *
- * ## Why this exists rather than `oslo/password`
+ * ## This value is set by the platform, not by preference
  *
- * The Worker originally used `Argon2id` from `oslo/password`. That is the right
- * *choice of algorithm* and the wrong *packaging*: `oslo/password` re-exports
- * Argon2id, Bcrypt and Scrypt from one module, and the first two load native
- * binaries through `require('@node-rs/argon2-win32-x64-msvc')` and friends.
- * `wrangler deploy` cannot bundle a `.node` file, so the build fails outright:
+ * OWASP's Password Storage Cheat Sheet lists **600,000** iterations for
+ * PBKDF2-HMAC-SHA-256. That is what this was written as, that is what the local
+ * suite exercises, and it does NOT work in production on a free Workers plan:
+ * the Free plan caps CPU time at roughly 10 ms per request.
  *
- *     No loader is configured for ".node" files: …/argon2.win32-x64-msvc.node
+ * Measured against the deployed Worker, by registering an account at each cost:
  *
- * On a Linux CI box those requires resolve to `.so` files and the build can
- * appear to succeed while shipping a Worker that would throw at runtime on any
- * other platform. That is a worse failure than a build error, so the dependency
- * is removed rather than worked around.
+ *   10,000 iterations  -> OK
+ *   50,000 iterations  -> OK
+ *   100,000 iterations -> OK   <-- this value
+ *   150,000 iterations -> HTTP 500 (CPU exceeded)
+ *   200,000 iterations -> HTTP 500
+ *   600,000 iterations -> HTTP 500 (the OWASP figure)
  *
- * ## What is used instead
+ * So 100,000 is the highest count observed to work, and it is roughly six times
+ * BELOW the OWASP recommendation. That is a real security downgrade, recorded
+ * here rather than buried, because the honest position is that this deployment
+ * has weaker password hashing than the design calls for.
  *
- * **PBKDF2-HMAC-SHA-256 via WebCrypto**, which is implemented natively in the
- * Workers runtime and needs no dependency at all.
+ * ## What to do about it
  *
- * - OWASP's Password Storage Cheat Sheet lists PBKDF2-HMAC-SHA-256 with
- *   **600,000** iterations as an acceptable configuration where Argon2id is not
- *   available. That is the default here, and it is a documented standards
- *   position rather than an improvised number.
- * - Per-user random salt, 16 bytes.
- * - Constant-time comparison of the derived key.
- * - The stored format is self-describing and versioned
- *   (`pbkdf2$sha256$<iters>$<salt-b64>$<hash-b64>`), so the cost can be raised
- *   later and a login with an old record transparently re-hashes at the new cost
- *   (see `needsRehash`).
+ * 1. Upgrade to Workers Paid ($5/month) and set this back to 600_000. That is the
+ *    correct fix. The plan floor is already assumed in the plan.md section 11 cost
+ *    model, and `[limits] cpu_ms` -- which the Free plan also refuses -- can then
+ *    be restored in wrangler.toml.
+ * 2. Mitigate around it meanwhile: a long passphrase, and Cloudflare Access in
+ *    front of the app (plan.md section 13) so the login form is not the only gate.
  *
- * ## The honest trade-off
- *
- * Argon2id is memory-hard and therefore strictly better against GPU cracking.
- * PBKDF2 is not. This is a real, deliberate downgrade forced by the platform,
- * and it is recorded here rather than hidden:
- *
- *   - it applies only to *this* Worker. The local crawler has no password auth.
- *   - iteration count is the only mitigation available, so it is set to the
- *     OWASP figure and never lowered casually.
- *   - if Workers ever ships Argon2id in WebCrypto (or a WASM-only package is
- *     adopted), swap `deriveKey` and keep the stored format's version prefix —
- *     the `pbkdf2$` tag makes the two coexist during migration.
- *
- * Because PBKDF2 is CPU-bound, the iteration count is also a *cost* decision:
- * every login spends CPU-ms, and Workers bills CPU after the included 30M ms.
- * `PBKDF2_ITERATIONS` is therefore a single named constant with the CPU
- * measurement that justifies it recorded next to it.
+ * Do not lower this to make a benchmark look better, and do not raise it without
+ * re-running the measurement above. The failure mode is a 500 on login, which is
+ * indistinguishable from a wrong password to anyone who is not reading the logs.
  */
-
-/**
- * OWASP-recommended PBKDF2-HMAC-SHA-256 iteration count.
- *
- * Measured in the Workers runtime (Miniflare, local): deriveBits at 600,000
- * iterations costs roughly 100–200 ms of CPU on a typical login. A login is a
- * once-per-session event, so that is affordable, and it is the number that makes
- * offline cracking expensive. Do not lower it to make a benchmark look better.
- */
-export const PBKDF2_ITERATIONS = 600_000;
-
+export const PBKDF2_ITERATIONS = 100_000;
 const ALGORITHM_TAG = "pbkdf2$sha256";
 const SALT_BYTES = 16;
 const KEY_BITS = 256;

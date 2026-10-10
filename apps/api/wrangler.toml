@@ -3,25 +3,34 @@ main = "src/index.ts"
 compatibility_date = "2024-12-18"
 compatibility_flags = ["nodejs_compat"]
 
-# ── CPU / memory limits ───────────────────────────────────────────────────────
-# Prevents a pathological archived page from burning the entire CPU allotment
-# (plan.md §11.5 item 6). 30 s is the ceiling for the whole invocation; the queue
-# consumer's own batching keeps a normal message far below it.
-[limits]
-cpu_ms = 30_000
+# ── CPU limit ────────────────────────────────────────────────────────────────
+# plan.md §11.5 asks for a per-invocation CPU ceiling so a pathological archived
+# page cannot burn the whole allotment. That setting is deliberately absent:
+#
+#   Cloudflare rejects `[limits] cpu_ms` on the Free plan --
+#   "CPU limits are not supported for the Free plan. Switch to a paid plan".
+#
+# The practical ceiling still exists (the runtime kills an invocation that spins),
+# it is just not configurable here. On the Workers Paid plan, reinstate:
+#
+#   [limits]
+#   cpu_ms = 30_000
+#
+# The other guardrails in this file -- MONTHLY_BUDGET_USD, CRAWL_QUOTA_PER_DAY,
+# MAX_PAGES_PER_MONTH and the queue consumer's per-message request budget -- are
+# the ones that actually bound cost, and none of them need a paid plan.
 
 # ── D1 ledger ────────────────────────────────────────────────────────────────
 [[d1_databases]]
 binding      = "DB"
 database_name = "custom-wayback-ledger"
-database_id  = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id  = "26bbcdbb-5d59-416e-bea0-9bb4968e20d7"
 migrations_dir = "../../packages/shared/migrations"
 
 # ── R2 bucket ────────────────────────────────────────────────────────────────
 [[r2_buckets]]
 binding     = "STORAGE"
-bucket_name = "REPLACE_WITH_YOUR_R2_BUCKET_NAME"
-# preview_bucket_name = "custom-wayback-dev"  # uncomment for local dev R2 preview
+bucket_name = "custom-wayback"
 
 # ── Cloudflare Queues ─────────────────────────────────────────────────────────
 #
@@ -79,8 +88,7 @@ crons = ["*/5 * * * *"]
 # ── KV (coverage-bar cache) ───────────────────────────────────────────────────
 [[kv_namespaces]]
 binding = "COVERAGE_KV"
-id      = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
-# preview_id = "REPLACE_WITH_YOUR_KV_PREVIEW_ID"
+id      = "3c44c2ecae654b1cab2de4c78ca38245"
 
 # ── Static assets ────────────────────────────────────────────────────────────
 # Workers Static Assets serves the Vite build; dynamic routes go to this Worker.

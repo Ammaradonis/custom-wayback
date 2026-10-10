@@ -11,11 +11,16 @@
  * Phase 4 changes:
  *  - <CostPanel /> for the §11.5 cost/quota/throttle readout.
  *  - Live throttle ("resuming in Ns") and degradedReason in the crawl progress.
+ *
+ * Phase 5 changes (plan §15):
+ *  - Top-bar links to /search and /compare.
+ *  - <ExportPanel /> for "download this month as a static bundle".
  */
 
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { Columns3, ExternalLink, LogOut, Search, Share2, X } from "lucide-react";
 import {
   domains,
   ingest,
@@ -28,7 +33,23 @@ import {
 import { MonthCalendar } from "@/components/MonthCalendar.js";
 import { StorageStatus } from "@/components/StorageStatus.js";
 import { CostPanel } from "@/components/CostPanel.js";
+import { FIELD_CLASS } from "@/hooks/useSites.js";
+import { fmtMonthLabel } from "@/lib/format.js";
+import type { ShareTarget } from "@/components/ShareDialog.js";
 import type { DayCoverage } from "@custom-wayback/shared";
+
+/** Lazy: the export panel is below the fold and is not on every visit's path. */
+const ExportPanel = lazy(() => import("@/components/ExportPanel.js"));
+/**
+ * Lazy: sharing is a deliberate action, so the dialog's code is fetched when the
+ * button is tapped rather than shipped in the dashboard chunk.
+ */
+const ShareDialog = lazy(() =>
+  import("@/components/ShareDialog.js").then((mod) => ({ default: mod.ShareDialog })),
+);
+
+/** The scope a share dialog opens with, remembered at the page level. */
+type ShareRequest = ShareTarget | null;
 
 function fmt(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -76,6 +97,7 @@ interface DomainRowProps {
   onStateChange: (next: Partial<DomainRowState>) => void;
   onStartCrawl: (domainId: string, month: string) => void;
   onRemove: (domainId: string) => void;
+  onShare: (target: ShareTarget) => void;
   isCrawling: boolean;
   navigate: (path: string) => void;
 }
@@ -86,6 +108,7 @@ function DomainRow({
   onStateChange,
   onStartCrawl,
   onRemove,
+  onShare,
   isCrawling,
   navigate,
 }: DomainRowProps) {
@@ -135,12 +158,21 @@ function DomainRow({
     ? selectedDay.slice(0, 7)
     : `${coverageYear}-${String(coverageMonth).padStart(2, "0")}`;
 
+  // The same query the calendar's dots come from, read as pages — so the share
+  // dialog can name the page for the picked day without a second request.
+  const { data: manifest } = useQuery({
+    queryKey: ["manifest", entry.domain, selectedMonth],
+    queryFn: () => manifests.manifest(entry.domain, selectedMonth),
+    staleTime: 1000 * 60 * 5,
+  });
+  const manifestPages = manifest?.pages ?? [];
+
   return (
-    <li className="rounded-lg border border-border p-4 space-y-3">
+    <li className="cw-panel space-y-3 p-4">
       {/* Domain header */}
       <div className="flex items-start justify-between gap-2">
-        <div className="flex-1 min-w-0">
-          <p className="font-medium truncate">{entry.domain}</p>
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-medium">{entry.domain}</p>
           {entry.lastCrawledAt && (
             <p className="text-xs text-muted-foreground">
               Last crawled {new Date(entry.lastCrawledAt * 1000).toLocaleDateString()}
@@ -148,15 +180,17 @@ function DomainRow({
           )}
         </div>
         <button
+          type="button"
           onClick={() => onRemove(entry.id)}
-          className="h-9 w-9 flex-none rounded-md text-muted-foreground hover:text-red-400 transition-colors"
+          className="cw-btn cw-btn-danger cw-btn-icon flex-none"
           aria-label={`Remove ${entry.domain}`}
+          title={`Remove ${entry.domain}`}
         >
-          ✕
+          <X className="h-4 w-4" aria-hidden />
         </button>
       </div>
 
-      {/* Calendar picker */}
+      {/* Picker + actions. Wraps on narrow screens so nothing is clipped. */}
       <div className="flex flex-wrap items-center gap-2">
         <MonthCalendar
           domain={entry.domain}
@@ -171,9 +205,10 @@ function DomainRow({
 
         {/* Crawl month button */}
         <button
+          type="button"
           onClick={() => onStartCrawl(entry.id, selectedMonth)}
           disabled={isCrawling}
-          className="h-9 rounded-md bg-accent px-3 text-sm font-medium text-accent-foreground disabled:opacity-50 transition-opacity"
+          className="cw-btn cw-btn-primary"
         >
           {isCrawling ? "Crawling…" : "Crawl month"}
         </button>
@@ -181,13 +216,52 @@ function DomainRow({
         {/* Open viewer (only when a specific day is picked) */}
         {selectedDay && (
           <button
+            type="button"
             onClick={() => navigate(`/a/${entry.domain}/${selectedDay}/`)}
-            className="h-9 rounded-md border border-border px-3 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            className="cw-btn cw-btn-secondary"
           >
-            View ↗
+            View <ExternalLink className="h-3.5 w-3.5" aria-hidden />
           </button>
         )}
+
+        {/* Share this month, or the picked day's page (plan §15). */}
+        <button
+          type="button"
+          onClick={() => {
+            // The manifest for the visible month is already loaded for the
+            // calendar, so the share dialog can be scoped to one page without a
+            // second request: the shortest URL of the picked day is the page the
+            // user is looking at. With no day picked, the link covers the month.
+            const pages =
+              selectedDay === null
+                ? []
+                : manifestPages
+                    .filter((p) => p.day === selectedDay)
+                    .sort((a, b) => a.url.length - b.url.length);
+            const page = pages[0];
+            onShare({
+              domain: entry.domain,
+              month: selectedMonth,
+              ...(selectedDay ? { day: selectedDay } : {}),
+              ...(page ? { url: page.url } : {}),
+            });
+          }}
+          className="cw-btn cw-btn-secondary"
+        >
+          <Share2 className="h-3.5 w-3.5" aria-hidden />
+          Share
+        </button>
       </div>
+
+      {/* What the buttons will act on. Without this the toolbar is a row of
+        * unlabelled buttons and the user has to infer the scope from a date
+        * button, which is exactly the ambiguity that made the old picker feel
+        * broken. */}
+      <p className="text-xs text-muted-foreground">
+        {selectedDay
+          ? `Selected ${selectedDay}`
+          : `Month ${fmtMonthLabel(selectedMonth)} — no day selected`}
+      </p>
     </li>
   );
 }
@@ -234,25 +308,25 @@ function CrawlProgress({ job }: { job: IngestProgressEvent }) {
 
         {/* Throttle state — never a silent hang (§12 rule 3). */}
         {throttle?.active === true && (
-          <p className="text-amber-300" role="status" aria-live="polite">
+          <p className="text-warning-foreground" role="status" aria-live="polite">
             ⏸ {throttle.message ?? "archive.org is throttling us"}
             {resumeIn !== null && <> — resuming in {resumeIn}s</>}
           </p>
         )}
         {throttle?.active === false && (throttle.consecutive ?? 0) > 0 && (
-          <p className="text-amber-300/80">
+          <p className="text-warning-foreground">
             {throttle.message ?? `${throttle.consecutive} throttle responses so far`}
           </p>
         )}
         {throttle?.active !== true && (job.ia429Count ?? 0) > 0 && (
-          <p className="text-yellow-400">
+          <p className="text-warning-foreground">
             ⚠ archive.org throttling detected ({job.ia429Count} 429s). Backing off…
           </p>
         )}
 
         {/* Degraded finish — say what was cut short and why. */}
         {job.degradedReason && (
-          <p className="text-amber-300">Partial result: {job.degradedReason}</p>
+          <p className="text-warning-foreground">Partial result: {job.degradedReason}</p>
         )}
       </div>
 
@@ -283,6 +357,7 @@ export default function DashboardPage() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeJobDomainId, setActiveJobDomainId] = useState<string | null>(null);
   const [jobProgress, setJobProgress] = useState<IngestProgressEvent | null>(null);
+  const [shareTarget, setShareTarget] = useState<ShareRequest>(null);
 
   // Per-domain calendar/selection state.
   const [rowStates, setRowStates] = useState<Record<string, DomainRowState>>({});
@@ -358,23 +433,54 @@ export default function DashboardPage() {
     navigate("/login");
   }
 
+  // A share dialog left open over a domain that has just been removed would offer
+  // to share something that no longer exists.
+  useEffect(() => {
+    if (shareTarget === null) return;
+    if (!(domainList as DomainEntry[]).some((d) => d.domain === shareTarget.domain)) {
+      setShareTarget(null);
+    }
+  }, [domainList, shareTarget]);
+
   return (
     <div className="min-h-dvh bg-background text-foreground">
-      {/* ── Top bar ── */}
+      {/* ── Top bar ──
+        * The nav is the part that has to survive 320px. It wraps, and it is
+        * allowed to shrink (`min-w-0`): a flex item's default `min-width: auto`
+        * means it refuses to go below its content's intrinsic width, which pushed
+        * the whole document to 345px on a 320px screen — and because a `fixed`
+        * overlay sizes to the document's scroll width, that dragged the calendar's
+        * bottom sheet out of alignment with it too. The labels drop below `sm`
+        * and the icons carry accessible names, so nothing is lost. */}
       <header
-        className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-background/80 px-4 py-3 backdrop-blur-sm"
-        style={{ paddingTop: "calc(0.75rem + var(--sai-top))" }}
+        className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b border-border bg-background/85 px-4 py-2 backdrop-blur-md"
+        style={{ paddingTop: "calc(0.5rem + var(--sai-top))" }}
       >
-        <span className="font-semibold text-base">Custom Wayback</span>
-        <button
-          onClick={handleLogout}
-          className="rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          Sign out
-        </button>
+        <span className="text-base font-semibold">Custom Wayback</span>
+        <nav className="flex min-w-0 flex-wrap items-center gap-1" aria-label="Main">
+          {/* Phase 5 surfaces (plan.md §15) — one tap from home (§2.3). */}
+          <Link to="/search" className="cw-btn cw-btn-ghost px-2 sm:px-4" aria-label="Search snapshots">
+            <Search className="h-4 w-4 shrink-0" aria-hidden />
+            <span className="hidden sm:inline">Search</span>
+          </Link>
+          <Link to="/compare" className="cw-btn cw-btn-ghost px-2 sm:px-4" aria-label="Compare months">
+            <Columns3 className="h-4 w-4 shrink-0" aria-hidden />
+            <span className="hidden sm:inline">Compare</span>
+          </Link>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="cw-btn cw-btn-ghost px-2 sm:px-4"
+            aria-label="Sign out"
+          >
+            <LogOut className="h-4 w-4 shrink-0" aria-hidden />
+            <span className="hidden sm:inline">Sign out</span>
+          </button>
+        </nav>
       </header>
 
-      <main className="mx-auto max-w-2xl px-4 py-8 space-y-8"
+      <main
+        className="mx-auto max-w-2xl space-y-8 px-4 py-6"
         style={{ paddingBottom: "calc(2rem + var(--sai-bottom))" }}
       >
         {/* ── Add domain ── */}
@@ -385,29 +491,31 @@ export default function DashboardPage() {
               e.preventDefault();
               addDomain.mutate(addInput);
             }}
-            className="flex gap-2"
+            className="flex flex-col gap-2 sm:flex-row"
           >
+            <label htmlFor="add-domain" className="sr-only">
+              Domain or URL to track
+            </label>
             <input
+              id="add-domain"
               type="text"
               placeholder="samsung.com or https://www.apple.com/iphone"
               value={addInput}
               onChange={(e) => setAddInput(e.target.value)}
-              className="flex-1 h-11 rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className={`${FIELD_CLASS} min-w-0 flex-1`}
               autoCapitalize="none"
               autoCorrect="off"
               autoComplete="url"
               inputMode="url"
             />
-            <button
-              type="submit"
-              disabled={addDomain.isPending}
-              className="h-11 rounded-md bg-accent px-4 text-sm font-semibold text-accent-foreground disabled:opacity-50 transition-opacity"
-            >
+            <button type="submit" disabled={addDomain.isPending} className="cw-btn cw-btn-primary">
               Add
             </button>
           </form>
           {addError && (
-            <p className="text-sm text-red-400" role="alert">{addError}</p>
+            <p className="text-sm text-danger-foreground" role="alert">
+              {addError}
+            </p>
           )}
         </section>
 
@@ -441,6 +549,7 @@ export default function DashboardPage() {
                   startCrawl.mutate({ domainId, month })
                 }
                 onRemove={(id) => removeDomain.mutate(id)}
+                onShare={setShareTarget}
                 isCrawling={
                   (startCrawl.isPending || activeJobId !== null) &&
                   activeJobDomainId === d.id
@@ -453,8 +562,8 @@ export default function DashboardPage() {
 
         {/* ── Active job progress ── */}
         {activeJobId && (
-          <section className="rounded-lg border border-border p-4 space-y-3">
-            <h2 className="font-semibold text-sm">Crawl in progress…</h2>
+          <section className="cw-panel space-y-3 p-4">
+            <h2 className="text-sm font-semibold">Crawl in progress…</h2>
             {jobProgress && <CrawlProgress job={jobProgress} />}
           </section>
         )}
@@ -462,9 +571,39 @@ export default function DashboardPage() {
         {/* ── Cost & politeness (plan §11.5 / §12) ── */}
         <CostPanel />
 
+        {/* ── Export a month as a static bundle (plan §15) ──
+            Lazy: the panel is below the fold and most visits never open it, so
+            its 10 KB stays out of the dashboard chunk and is fetched on demand. */}
+        <Suspense
+          fallback={
+            <section className="cw-panel space-y-3 p-4">
+              <div className="h-5 w-40 rounded bg-muted animate-pulse" />
+              <div className="h-11 rounded bg-muted animate-pulse" />
+              <p className="text-xs text-muted-foreground" role="status">
+                Loading export tools…
+              </p>
+            </section>
+          }
+        >
+          <ExportPanel />
+        </Suspense>
+
         {/* ── Storage status ── */}
         <StorageStatus />
       </main>
+
+      {/* ── Share links (plan §15) ── */}
+      {shareTarget && (
+        <Suspense fallback={null}>
+          <ShareDialog
+            open
+            onOpenChange={(next) => {
+              if (!next) setShareTarget(null);
+            }}
+            target={shareTarget}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
