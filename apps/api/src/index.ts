@@ -33,8 +33,10 @@ import { searchRouter } from "./routes/search.js";
 import { sharesRouter } from "./routes/shares.js";
 import { compareRouter } from "./routes/compare.js";
 import { exportRouter } from "./routes/export.js";
+import { backupRouter, backupHealth } from "./routes/backup.js";
 import { purgeStaleCachedPages } from "./lib/r2.js";
 import { pruneRateLimits } from "./lib/ratelimit.js";
+import { BackupNotConfiguredError, BackupSync, backupEnabled } from "./lib/backup.js";
 import { handleIngestMessage, handleDeadLetter } from "./queue/ingest.js";
 import { LEASE_SECONDS, type IngestQueueMessage } from "@custom-wayback/shared";
 import type { Env } from "./env.js";
@@ -119,8 +121,30 @@ app.get("/v1/health", async (c) => {
   // failed health check that names the missing variable.
   checks["secrets"] = typeof c.env.JWT_SECRET === "string" && c.env.JWT_SECRET.length >= 32;
 
+  // The Supabase backup mirror is reported but deliberately **not** folded into
+  // `ok`. It is best-effort by design: Supabase having a bad minute must not make
+  // the Worker declare itself unhealthy, or every uptime monitor pointed here
+  // would page for something the app is built to survive. The nested object
+  // carries the states a boolean cannot (`behind`, `failing`, `drift`,
+  // `unreachable`), and `configured: false` is the ordinary "not set up yet".
+  const backup = await backupHealth(c.env);
   const allOk = Object.values(checks).every(Boolean);
-  return c.json({ ok: allOk, checks }, allOk ? 200 : 503);
+  return c.json(
+    {
+      ok: allOk,
+      checks,
+      backup: {
+        configured: backup.configured,
+        enabled: backup.enabled,
+        reachable: backup.reachable,
+        health: backup.health,
+        lagSeconds: backup.lagSeconds,
+        pendingRows: backup.pendingRows,
+        ...(backup.error ? { error: backup.error } : {}),
+      },
+    },
+    allOk ? 200 : 503,
+  );
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -132,6 +156,7 @@ app.route("/v1/search", searchRouter);
 app.route("/v1/shares", sharesRouter);
 app.route("/v1/compare", compareRouter);
 app.route("/v1/export", exportRouter);
+app.route("/v1/backup", backupRouter);
 app.route("/v1", manifestRouter);
 app.route("/a", viewerRouter);
 
@@ -272,6 +297,51 @@ async function requeueStalledJobs(env: Env): Promise<number> {
   return requeued;
 }
 
+/**
+ * Mirror the D1 ledger into Supabase.
+ *
+ * Runs on every cron tick; the *syncer* decides whether there is anything to do,
+ * via three cheap gates that cost one D1 read each and no network:
+ *
+ *   1. `BACKUP_ENABLED` — an off switch that does not require removing secrets.
+ *   2. a lease, so two ticks cannot run concurrently;
+ *   3. an interval and a per-day run ceiling, so a quiet deployment still talks to
+ *      Supabase often enough to keep a free project from being paused for
+ *      inactivity, but not once every five minutes forever.
+ *
+ * A run that finds nothing new costs no HTTP requests at all: each table's high
+ * watermark is compared against the mirror's cursor first. That is what makes it
+ * reasonable to leave this on the five-minute trigger rather than adding a second
+ * schedule — and adding a second cron entry would mean a second `[triggers]`
+ * block, which is one more thing to get wrong at deploy time.
+ */
+async function runScheduledBackup(env: Env): Promise<void> {
+  if (!backupEnabled(env)) return;
+  try {
+    const sync = new BackupSync(env);
+    const summary = await sync.run();
+    if (summary.rows > 0) {
+      console.log(
+        `[backup] mirrored ${summary.rows} row(s) across ${summary.tables.length} table(s) in ${summary.durationMs}ms`,
+      );
+    }
+    if (summary.failures.length > 0) {
+      console.error(`[backup] failed tables: ${summary.failures.join(", ")}`);
+    }
+    if (summary.stoppedBecause === "drift") {
+      console.error(
+        `[backup] schema drift: ${(summary.drift ?? [])
+          .map((d) => d.detail)
+          .slice(0, 5)
+          .join("; ")}`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof BackupNotConfiguredError) return; // Optional feature, not an error.
+    console.error(`[backup] run failed: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 // ── Default export (fetch + queue + scheduled handlers) ──────────────────────
 
 export default {
@@ -340,6 +410,10 @@ export default {
         } catch (err) {
           console.error(`[queue] stalled-job sweep failed: ${err instanceof Error ? err.message : err}`);
         }
+
+        // Last, so a slow mirror can never delay the sweeps that keep the crawler
+        // moving. It is the only one of the four that talks to a third party.
+        await runScheduledBackup(env);
       })(),
     );
   },

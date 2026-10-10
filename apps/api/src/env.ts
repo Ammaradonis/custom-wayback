@@ -29,6 +29,16 @@ export interface Env {
   STORAGE_ENDPOINT: string;
   STORAGE_BUCKET_NAME: string;
 
+  // ── Supabase backup mirror (optional) ────────────────────────────────────
+  //
+  // Both are secrets: the service-role key bypasses the mirror's row-level
+  // security by design, and the URL identifies the project. Optional on purpose —
+  // `supabaseConfigFromEnv` returns null when either is absent, so a deployment
+  // with no backup configured boots, serves and reports `configured: false`
+  // rather than failing every request through a missing binding.
+  SUPABASE_URL?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+
   // ── Non-secret vars ──────────────────────────────────────────────────────
   CRAWLER_USER_AGENT: string;
   MAX_PAGES_PER_MONTH: string;
@@ -40,4 +50,22 @@ export interface Env {
   MONTHLY_BUDGET_USD: string;
   /** Optional: only allow registrations from these comma-separated emails. */
   ALLOWED_EMAILS?: string;
+
+  // ── Backup tuning (all optional; see packages/shared/src/backup.ts) ──────
+  /** Mirrored schema. Defaults to `cw_backup`. */
+  SUPABASE_SCHEMA?: string;
+  /** "false" turns the automatic backup off without removing the secrets. */
+  BACKUP_ENABLED?: string;
+  /** Minimum seconds between automatic runs. Default 900. */
+  BACKUP_INTERVAL_SECONDS?: string;
+  /** Automatic runs per UTC day. Default 96. */
+  BACKUP_RUNS_PER_DAY?: string;
+  /** Wall-clock ceiling for one run, in ms. Default 20000. */
+  BACKUP_MAX_RUNTIME_MS?: string;
+  /** Rows read from D1 per page. Default 200. */
+  BACKUP_READ_BATCH?: string;
+  /** Rows per PostgREST upsert. Default 200. */
+  BACKUP_PUSH_BATCH?: string;
+  /** Serialised request-body ceiling, in bytes. Default 262144. */
+  BACKUP_PUSH_BYTES?: string;
 }
