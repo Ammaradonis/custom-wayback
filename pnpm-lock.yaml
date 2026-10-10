@@ -63,6 +63,9 @@ importers:
       '@custom-wayback/pipeline':
         specifier: workspace:*
         version: link:../../packages/pipeline
+      '@custom-wayback/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       linkedom:
         specifier: 0.18.5
         version: 0.18.5

@@ -120,8 +120,8 @@ Full runbook, including the induced-429 acceptance test and the rollback table:
 ## Tests
 
 ```powershell
-npx --no-install pnpm turbo run typecheck   # 7 packages
-npx --no-install pnpm turbo run test        # 66 tests: 33 pipeline/crawler, 33 api
+npx --no-install pnpm turbo run typecheck   # 7 tasks, all packages
+npx --no-install pnpm turbo run test        # 132 tests: 33 crawler, 99 api
 ```
 
 `apps/api`'s tests run the **shipping module graph**: `scripts/run-api-tests.mjs` bundles each test
@@ -130,12 +130,13 @@ links resolve exactly as they do in production. The queue consumer is driven end
 fake D1/R2/Queues with a stubbed network, which is the only way to test the parts that matter —
 stage transitions, cursor resumption, and a 429 storm that no real run can schedule.
 
-> `turbo run typecheck` currently fails on `@custom-wayback/crawler-local` with
-> `TS2307: Cannot find module '@custom-wayback/shared'`. That is a pre-existing packaging bug in the
-> crawler, not a UI problem: `apps/crawler-local/src/politeness.ts` imports the package but
-> `apps/crawler-local/package.json` never declares it. The fix is to add
-> `"@custom-wayback/shared": "workspace:*"` to that file's `dependencies` and re-run
-> `pnpm install`. The `web` and `api` typechecks both pass.
+> **Workspace dependencies must be declared, even inside a monorepo.** `crawler-local` imported
+> `@custom-wayback/shared` while its `package.json` listed only `@custom-wayback/pipeline`, so
+> `tsc` could not resolve the module and the package's typecheck failed with
+> `TS2307: Cannot find module '@custom-wayback/shared'`. pnpm's strict `node_modules` layout — the
+> thing that stops a package from importing something it never asked for — is what surfaced it. The
+> import was deliberate (`src/politeness.ts` shares its backoff maths with the Worker's queue
+> consumer so the two crawl paths cannot drift), so the fix was the declaration, not the import.
 
 ### UI verification
 
