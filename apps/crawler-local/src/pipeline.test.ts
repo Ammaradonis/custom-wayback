@@ -26,7 +26,7 @@ import {
   isNavigablePage,
 } from '@custom-wayback/pipeline';
 import { cssUrls, extractPage, rewriteCss, rewritePage } from './rewrite.ts';
-import { parseCdxJson, buildIdUrl, buildSurveyUrl, htmlSurvey } from './wayback.ts';
+import { parseCdxJson, buildIdUrl, buildSurveyUrl, htmlSurvey, assetSurvey } from './wayback.ts';
 import { parseMonth, registrableDomain } from './config.ts';
 import { matchSnapshotRoute } from './viewer.ts';
 import type { CdxRow } from '@custom-wayback/pipeline';
@@ -221,6 +221,67 @@ test('survey URL never uses showResumeKey (it forces a full index scan)', () => 
   assert.ok(!url.includes('showResumeKey'));
   assert.ok(!url.includes('collapse'));
 });
+
+test('the HTML survey asks for HTML only', () => {
+  // Without `mimetype:text/html` the survey returns every capture under the domain —
+  // images, CSS, JS — and a row budget fills up with assets before it reaches the
+  // site's pages. Every asset that then reaches the page selector becomes a ledger row
+  // with a `/…png` route that can never render, which is a month that looks crawled and
+  // opens to a 404.
+  const url = buildSurveyUrl(htmlSurvey('example.com', '20240101000000', '20240131235959', 2000));
+  const filters = [...new URL(url).searchParams.getAll('filter')];
+  assert.deepEqual(filters, ['statuscode:200', 'mimetype:text/html']);
+});
+
+test('the asset survey asks for everything except HTML', () => {
+  const url = buildSurveyUrl(assetSurvey('example.com', '20240101000000', '20240131235959', 500));
+  assert.deepEqual([...new URL(url).searchParams.getAll('filter')], ['!mimetype:text/html']);
+});
+
+test('asset URLs are never treated as navigable pages', () => {
+  // Belt and braces over the CDX mimetype filter: archive.org's declared type and the
+  // URL do not always agree, and a mislabelled image must be skipped rather than turned
+  // into an unroutable page.
+  for (const asset of [
+    'https://e.com/arrows.png',
+    'https://e.com/img/hero.JPG',
+    'https://e.com/x.gif',
+    'https://e.com/style.css',
+    'https://e.com/app.js',
+    'https://e.com/font.woff2',
+    'https://e.com/doc.pdf',
+    'https://e.com/data.json',
+  ]) {
+    assert.equal(isNavigablePage(asset), false, `${asset} should not be a page`);
+  }
+  // Extension-less routes are real pages on most sites, so they stay.
+  for (const page of ['https://e.com/', 'https://e.com/about', 'https://e.com/p/12345']) {
+    assert.equal(isNavigablePage(page), true, `${page} should be a page`);
+  }
+  // A declared non-page media type is enough, even with no extension.
+  assert.equal(isNavigablePage('https://e.com/p/12345', 'image/png'), false);
+  assert.equal(isNavigablePage('https://e.com/', 'text/html'), true);
+  // `unk` and blank are what archive.org reports for unclassified captures; dropping
+  // those would throw away real pages.
+  assert.equal(isNavigablePage('https://e.com/about', 'unk'), true);
+});
+
+test('selectPages never emits an asset as a page', () => {
+  const rows: CdxRow[] = [
+    row('https://e.com/', '20240101010000', 900),
+    { ...row('https://e.com/arrows.png', '20240101010000', 4000), mime: 'image/png' },
+    { ...row('https://e.com/site.css', '20240101010000', 3000), mime: 'text/css' },
+    // Mislabelled asset: the URL still gives it away.
+    row('https://e.com/logo.svg', '20240101010000', 5000),
+  ];
+  const { pages } = selectPages(rows, 'perday', 'https://e.com/');
+  assert.deepEqual(
+    pages.map((p) => p.url),
+    ['https://e.com/'],
+    'only the real page should survive selection',
+  );
+});
+
 
 // ------------------------------------------------------------- day-selection
 

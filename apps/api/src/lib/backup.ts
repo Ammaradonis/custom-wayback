@@ -59,6 +59,7 @@ import {
   d1HighWaterSql,
   d1PendingCountSql,
   d1ReadParams,
+  coerceCursor,
   d1ReadSql,
   MORE_FIELD,
   diffAgainstD1,
@@ -438,9 +439,10 @@ export class BackupSync {
     plan: TablePlan,
     cursor: string,
     limit: number,
+    strict = false,
   ): Promise<{ rows: BackupRow[]; watermark: string | number | null; more: boolean }> {
     const res = await this.db
-      .prepare(d1ReadSql(plan, limit))
+      .prepare(d1ReadSql(plan, limit, { strict }))
       .bind(...d1ReadParams(plan, cursor))
       .all<BackupRow>();
     const raw = res.results ?? [];
@@ -689,7 +691,16 @@ export class BackupSync {
       for (let page = 0; page < BACKUP_DEFAULTS.maxPagesPerTable; page++) {
         if (Date.now() > deadline) break;
 
-        const { rows, watermark, more } = await this.readBatch(plan, current, readBatch);
+        // The first page of a run is read inclusively (at-least-once: a run that died
+        // before recording its cursor re-covers the boundary rows); every later page
+        // is strictly greater, because the cursor it starts from *is* the previous
+        // page's boundary and re-reading it would return the same rows forever.
+        const { rows, watermark, more } = await this.readBatch(
+          plan,
+          current,
+          readBatch,
+          page > 0,
+        );
         if (rows.length === 0) break;
 
         if (watermark === null) {
@@ -882,9 +893,12 @@ export class BackupSync {
   private async pendingRows(plan: TablePlan, cursor: string | null): Promise<number> {
     const sql = d1PendingCountSql(plan, cursor !== null);
     const stmt = this.db.prepare(sql);
+    // `coerceCursor` for the same reason the read query uses it: a cursor stored as
+    // text compared against an integer column matches nothing in SQLite, which would
+    // report every table as fully pending even when it is current.
     const row = cursor === null
       ? await stmt.first<{ n: number }>()
-      : await stmt.bind(cursor).first<{ n: number }>();
+      : await stmt.bind(coerceCursor(cursor)).first<{ n: number }>();
     return row?.n ?? 0;
   }
 }

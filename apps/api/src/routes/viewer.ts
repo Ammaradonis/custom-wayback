@@ -158,6 +158,27 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
       return c.redirect(`/a/${domain}/${rootElsewhere}/`, 302);
     }
 
+    // Nothing matched the requested route at all — but the day may still have *some*
+    // HTML. Open the shallowest capture of the day and let the visitor navigate from
+    // there.
+    //
+    // This exists because a homepage is frequently captured with a query string
+    // (`https://www.university.com/?a=ctjzgrgkbb` was the only HTML capture of its day
+    // in the live archive). Its route is `/%3Fa=ctjzgrgkbb`, which no request for `/`
+    // will ever ask for, so without this the month is browsable in the ledger and shows
+    // a 404 in the browser.
+    const anyHtml = await c.env.DB.prepare(
+      `SELECT page_id FROM snapshots
+       WHERE domain = ? AND day = ? AND mime LIKE 'text/html%' AND page_id IS NOT NULL
+       ORDER BY LENGTH(page_id) ASC, ts ASC
+       LIMIT 1`,
+    )
+      .bind(domain, day)
+      .first<{ page_id: string }>();
+    if (anyHtml?.page_id) {
+      return c.redirect(`/a/${domain}/${day}${anyHtml.page_id}`, 302);
+    }
+
     // The link-resolution ledger carries the nearest capture the *crawl* recorded,
     // which covers links that were resolved at ingest time but never stored as a
     // snapshot of their own.

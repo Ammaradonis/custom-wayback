@@ -375,14 +375,20 @@ async function runSurvey(
 
   const outcome = await fetcher.fetch(url, {
     accept: "application/json,text/plain,*/*",
-    // The CDX index is the one endpoint that legitimately takes tens of seconds.
-    // The pipeline's measured table (packages/pipeline/src/wayback.ts) records
-    // domain+month range queries returning at ~10–25 s and hanging to 60 s+ when
-    // they are going to fail. A 20 s timeout therefore fails queries that would
-    // have succeeded, which is what the first smoke-test run showed. 45 s sits
-    // inside the plan's "seconds to low minutes" promise and still fails fast
-    // enough that a dead survey does not stall the job.
-    timeoutMs: 45_000,
+    // The CDX index is the one endpoint that legitimately takes tens of seconds. The
+    // pipeline's measured table (packages/pipeline/src/wayback.ts) records
+    // domain+month range queries returning at ~10–40 s and hanging to 60 s+ when they
+    // are going to fail.
+    //
+    // This was 45 s, and 45 s was *too low*: a verified domain+month query with the
+    // HTML filter measured **54 s** on 2026-10-24, so every survey of a real domain
+    // timed out and the crawl degraded to nothing. The whole month then failed with
+    // "CDX survey unavailable (timed out after 45000 ms)" — 5 of 7 ingests in the live
+    // database — which is the difference between "slow" and "the app is dead".
+    //
+    // 90 s is still bounded (a queue consumer may take minutes), and it is comfortably
+    // above the observed p100 for a query that is going to succeed at all.
+    timeoutMs: 90_000,
   });
   usage.add("ia_fetch", 1);
 

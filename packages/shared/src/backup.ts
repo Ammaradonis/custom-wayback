@@ -564,12 +564,41 @@ export function columnNames(plan: TablePlan): string[] {
  * the plan, and `assertWatermark` plus the fixed identifier grammar is what makes that
  * interpolation safe. The cursor is always bound, never interpolated.
  */
-export function d1ReadSql(plan: TablePlan, batchSize: number): string {
+export function d1ReadSql(
+  plan: TablePlan,
+  batchSize: number,
+  options: { strict?: boolean } = {},
+): string {
   assertWatermark(plan);
   const cols = columnNames(plan).join(", ");
   const wm = plan.watermarkSql;
   const notNull = plan.watermarkNotNull ? ` AND ${wm} IS NOT NULL` : "";
   const keyColumns = plan.columns.filter((c) => c.key).map((c) => c.name);
+
+  /**
+   * `>` for every page after the first, `>=` for the first page of a run.
+   *
+   * ## Why the first page is inclusive and the rest are not
+   *
+   * The inclusive bound is the at-least-once guarantee: a run that died between
+   * pushing a batch and recording its cursor re-reads that batch on the next run, so a
+   * lost response costs a repeated upsert rather than a lost row. The primary key makes
+   * the repeat harmless.
+   *
+   * Inside one run, though, inclusive is a *livelock*. The cursor is advanced to the
+   * batch boundary, and the boundary is the watermark of the batch's last row — so the
+   * next read with `>=` sees the same boundary value again, computes the same boundary,
+   * and returns the same rows. With seven rows sharing a watermark and a batch of three,
+   * that re-pushed all seven rows on every one of the ten permitted pages: 70 rows
+   * instead of 7. The generic form of the bug is "a page whose boundary is shared by
+   * more rows than fit in a batch never advances", which is precisely the case the
+   * boundary logic exists to handle.
+   *
+   * So once a page has been committed, the next read asks for strictly greater, and the
+   * value just copied is not revisited. Every placeholder in the statement uses the same
+   * operator, because `d1ReadParams` supplies the same cursor to all of them.
+   */
+  const cmp = options.strict ? '>' : '>=';
 
   // `__wm` is projected alongside the planned columns so the caller can take the
   // batch's highest watermark as the next cursor without re-deriving which column
@@ -581,32 +610,48 @@ export function d1ReadSql(plan: TablePlan, batchSize: number): string {
     // to add a keyless table, not a path any current table takes.
     return (
       `SELECT ${cols}, ${wm} AS ${WATERMARK_FIELD} FROM ${plan.name}` +
-      ` WHERE ${wm} >= ?${notNull}` +
+      ` WHERE ${wm} ${cmp} ?${notNull}` +
       ` ORDER BY ${wm} ASC LIMIT ${batchSize}`
     );
   }
 
   const order = keyColumns.join(", ");
   const offset = batchSize - 1;
-  // `s`, `s3`, `s4` and `s9` are aliases into the same table; `pending` names the
-  // filtered subquery. Distinct names on purpose: an alias reused across nesting
-  // levels shadows the outer one and the predicate then compares a row with itself.
+  // ## The watermark expression is NOT prefixed with the table alias
+  //
+  // It looks like it should be — the subqueries alias the table as `s`, `s3`, `s4`,
+  // `s9`, and prefixing a column reference is the usual way to be explicit. But the
+  // watermark is very often an *expression*, not a column: `snapshots` uses
+  // `COALESCE(purged_at, served_at, 0)`, `assets` uses
+  // `COALESCE(r2_deleted_at, first_seen_at)`. So `s.${wm}` expands to
+  //
+  //     s.COALESCE(r2_deleted_at, first_seen_at)
+  //
+  // which is a syntax error in SQLite and took every COALESCE-watermarked table down
+  // with `near "(": syntax error` — eight of the fourteen. The simple-column tables
+  // (`id`, `window_start`, `created_at`) worked, which is exactly why the bug hid: the
+  // first tests anyone writes use those.
+  //
+  // Unqualified references are correct and unambiguous here because each subquery has
+  // exactly one table in its FROM. The distinct aliases remain, because they are what
+  // keeps a nested subquery from resolving a column against the *outer* table — the
+  // alias disambiguates the relation, not the column expression.
   const bound =
     `COALESCE(` +
-    `(SELECT s.${wm} FROM ${plan.name} s WHERE s.${wm} >= ?` +
-    ` ORDER BY s.${wm} ASC LIMIT 1 OFFSET ${offset}),` +
-    `(SELECT MAX(s9.${wm}) FROM ${plan.name} s9 WHERE s9.${wm} >= ?)` +
+    `(SELECT ${wm} FROM ${plan.name} s WHERE ${wm} ${cmp} ?` +
+    ` ORDER BY ${wm} ASC LIMIT 1 OFFSET ${offset}),` +
+    `(SELECT MAX(${wm}) FROM ${plan.name} s9 WHERE ${wm} ${cmp} ?)` +
     `)`;
   const more =
-    `(SELECT MAX(s3.${wm}) FROM ${plan.name} s3` +
-    ` WHERE s3.${wm} >= ? AND s3.${wm} >` +
-    ` (SELECT s4.${wm} FROM ${plan.name} s4 WHERE s4.${wm} >= ?` +
-    ` ORDER BY s4.${wm} ASC LIMIT 1 OFFSET ${offset}))`;
+    `(SELECT MAX(${wm}) FROM ${plan.name} s3` +
+    ` WHERE ${wm} >= ? AND ${wm} >` +
+    ` (SELECT ${wm} FROM ${plan.name} s4 WHERE ${wm} ${cmp} ?` +
+    ` ORDER BY ${wm} ASC LIMIT 1 OFFSET ${offset}))`;
 
   return (
     `SELECT ${cols}, ${wm} AS ${WATERMARK_FIELD}, ${bound} AS ${BOUND_FIELD}, ${more} AS ${MORE_FIELD}` +
     ` FROM ${plan.name}` +
-    ` WHERE ${wm} >= ?${notNull}` +
+    ` WHERE ${wm} ${cmp} ?${notNull}` +
     ` AND ${wm} <= ${bound}` +
     ` ORDER BY ${order} ASC`
   );
@@ -627,14 +672,42 @@ export function d1ReadParamCount(plan: TablePlan): number {
 }
 
 /**
+ * Coerce a stored cursor into the value SQLite should compare against.
+ *
+ * ## Why this is not "just pass the string"
+ *
+ * A cursor is persisted as text (it may be an integer, a date, or a ULID), so it comes
+ * back out of `backup_state` as a string. Binding that string into
+ * `WHERE watermark >= ?` is wrong for every numeric watermark, and wrong silently:
+ *
+ *   * SQLite compares values of different storage classes by *class order* — NULL,
+ *     then INTEGER/REAL, then TEXT, then BLOB. So `1000 >= '0'` is **false**, because
+ *     every integer sorts before every string.
+ *   * The result is a range predicate that matches nothing at all: every
+ *     integer-watermarked table reads zero rows, syncs nothing, and reports success.
+ *
+ * A hand-written fake that compared with JavaScript's `<` never saw it, because
+ * `1000 >= "0"` is true there. Real SQLite disagrees, and real SQLite is what runs.
+ *
+ * So a cursor that looks like a number is bound as one, and anything else (a ULID, a
+ * date string) stays text — which is the correct affinity for those columns.
+ */
+export function coerceCursor(cursor: string): string | number {
+  if (cursor === "") return cursor;
+  const asNumber = Number(cursor);
+  return Number.isFinite(asNumber) && String(asNumber) === cursor.trim() ? asNumber : cursor;
+}
+
+/**
  * The values to bind, in order, for a given cursor.
  *
  * Every placeholder takes the same cursor: the range predicate selects rows at or
  * above it, and the boundary and lookahead subqueries must measure that same set —
  * otherwise the batch would be sized against rows the predicate had already excluded.
  */
-export function d1ReadParams(plan: TablePlan, cursor: string): string[] {
-  return Array.from({ length: d1ReadParamCount(plan) }, () => cursor);
+export function d1ReadParams(plan: TablePlan, cursor: string): (string | number)[] {
+  const value = coerceCursor(cursor);
+  return Array.from({ length: d1ReadParamCount(plan) }, () => value);
 }
 
 /**
@@ -677,8 +750,12 @@ export function d1PendingCountSql(plan: TablePlan, hasCursor: boolean): string {
 
   // `COALESCE` and not the bare expression: a null watermark compares to nothing,
   // so `wm >= ?` would silently exclude the row and under-report what is pending.
-  // `d1ReadSql` uses the same coalesce, so the count and the sync agree.
-  return `SELECT COUNT(*) AS n FROM ${plan.name} WHERE COALESCE(${wm}, 0) >= ?`;
+  //
+  // Strictly greater, because a cursor means "everything at or below this has been
+  // pushed". The *read* is inclusive on its first page (at-least-once), but that
+  // re-read is an implementation detail — reporting the boundary row as permanently
+  // "pending" would show a backlog that never drains.
+  return `SELECT COUNT(*) AS n FROM ${plan.name} WHERE COALESCE(${wm}, 0) > ?`;
 }
 
 // ── Value mapping ─────────────────────────────────────────────────────────────

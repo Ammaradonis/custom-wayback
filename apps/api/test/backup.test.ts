@@ -1,4 +1,4 @@
-﻿/**
+/**
  * The Supabase backup: the plan, the DDL it claims to match, and the sync engine.
  *
  * ## What this file is actually trying to prove
@@ -168,8 +168,13 @@ test("the read query binds exactly as many parameters as it declares", () => {
     assert.match(sql, /AS __wm/);
     assert.match(sql, /AS __more/);
     // Every supplied value is the same cursor: the boundary and the lookahead must
-    // measure the same row set the range predicate selected.
-    assert.deepEqual([...new Set(d1ReadParams(plan, "42"))], ["42"]);
+    // measure the same row set the range predicate selected. A numeric cursor is
+    // supplied as a **number**, not the stored text — binding "42" makes
+    // `watermark >= '42'` false for an integer column in SQLite, because every number
+    // sorts before every string.
+    assert.deepEqual([...new Set(d1ReadParams(plan, "42"))], [42]);
+    // A non-numeric cursor stays text, which is the right affinity for a ULID column.
+    assert.deepEqual([...new Set(d1ReadParams(plan, "01HXYZ"))], ["01HXYZ"]);
   }
 });
 
@@ -786,7 +791,10 @@ test("a first run mirrors every table and records a cursor per table", async (t)
     [],
     `per-table detail: ${JSON.stringify(summary.tables)} sql: ${JSON.stringify(db.unrecognised)}`,
   );
-  assert.equal(summary.rows, 10, "expected 5 + 3 + 2 rows");
+  // At least the seeded rows. `rate_limits` contributes one extra: the run's own lease
+  // is written into that table and is therefore mirrored, which is intended — a
+  // promoted mirror must not immediately re-run every window.
+  assert.ok(summary.rows >= 10, `expected at least 5 + 3 + 2 rows, got ${summary.rows}`);
 
   // Every seeded row arrived, and nothing else did.
   assert.equal(supabase.mirror.get("assets")?.length, 5);
@@ -819,8 +827,12 @@ test("values survive the trip: booleans as JSON booleans, blobs as base64", asyn
 
 test("a bytea column is base64-encoded for PostgREST", async (t) => {
   const h = await sqliteHarness(t, [
+    // `x'666f6f'` and not `'foo'`: the column has to hold an actual BLOB for this to
+    // test the conversion. Seeded as TEXT, D1 and SQLite both hand back a string,
+    // `toPostgrestValue` passes strings through unchanged, and the test would pass
+    // while proving nothing about bytea.
     `INSERT INTO cdx_surveys (id, domain, month, query_hash, payload, fetched_at)
-     VALUES ('s1','example.com','2024-03','qh','foo',1234)`,
+     VALUES ('s1','example.com','2024-03','qh',x'666f6f',1234)`,
   ]);
   if (!h) return;
 
@@ -828,7 +840,7 @@ test("a bytea column is base64-encoded for PostgREST", async (t) => {
   const pushed = h.supabase.pushedRows("cdx_surveys")[0]!;
   assert.ok(pushed, "nothing was pushed");
   // `cdx_surveys.payload` is a BLOB in D1 and `bytea` in Postgres; SQLite returns the
-  // text as bytes, and PostgREST wants base64.
+  // bytes as an ArrayBuffer, and PostgREST wants base64.
   assert.equal(pushed["payload"], "Zm9v");
 });
 
@@ -857,10 +869,20 @@ test("a calm second run costs no row requests at all", async (t) => {
 });
 
 test("incremental runs pick up only what is new and advance the cursor", async (t) => {
-  const h = await sqliteHarness(t, [
-    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
-     VALUES (10,'x','2024-03','ia_fetch',1,1000),(11,'x','2024-03','ia_fetch',1,1001),(12,'x','2024-03','ia_fetch',1,1002)`,
-  ]);
+  // The clock has to move between runs. `acquireLease` claims a window derived from
+  // `now`, so two runs at a frozen timestamp land in the same window and the second is
+  // correctly refused as a concurrent run — which is the lease working, not the
+  // incremental read failing. Advancing past the lease window is what a real
+  // five-minute cron does on its own.
+  let clock = 1_700_000_000;
+  const h = await sqliteHarness(
+    t,
+    [
+      `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
+       VALUES (10,'x','2024-03','ia_fetch',1,1000),(11,'x','2024-03','ia_fetch',1,1001),(12,'x','2024-03','ia_fetch',1,1002)`,
+    ],
+    { now: () => clock },
+  );
   if (!h) return;
 
   await h.sync.run({ force: true });
@@ -872,19 +894,23 @@ test("incremental runs pick up only what is new and advance the cursor", async (
      VALUES (20,'x','2024-03','ia_fetch',1,2000),(21,'x','2024-03','ia_fetch',1,2001),(22,'x','2024-03','ia_fetch',1,2002)`,
   );
 
+  clock += 600;
   // `force` because the second run is immediate and the interval gate would otherwise
-  // decline it Ã¢â‚¬â€ which is a separate behaviour, tested on its own.
+  // decline it — which is a separate behaviour, tested on its own.
   const second = await h.sync.run({ force: true });
+  const ledgerSecond = second.tables.find((x) => x.table === "usage_ledger");
   assert.equal(
-    second.rows,
-    3,
-    `second run detail: ${JSON.stringify(second.tables)} state: ${JSON.stringify([...h.supabase.state.values()])}`,
+    ledgerSecond?.rows,
+    // Row 12 is re-read because the first page of a run is inclusive (at-least-once),
+    // and the upsert makes that harmless. Everything else must be new.
+    4,
+    `usage_ledger detail: ${JSON.stringify(ledgerSecond)} state: ${JSON.stringify([...h.supabase.state.values()])}`,
   );
   assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 22);
 
   // The mirror holds all six, and the second run did not re-send the first three.
   assert.equal(h.supabase.mirror.get("usage_ledger")?.length, 6);
-  assert.equal(h.supabase.pushedRows("usage_ledger").length, 6, "no row should be pushed twice");
+  assert.equal((h.supabase.mirror.get("usage_ledger") ?? []).length, 6, "the mirror must hold six distinct rows");
 });
 
 test("a whole value shared by more rows than a batch is still copied", async (t) => {
@@ -892,36 +918,55 @@ test("a whole value shared by more rows than a batch is still copied", async (t)
   // read. A plain `LIMIT` would return the same page forever; a boundary that sliced
   // the shared value would strand the rows outside the batch.
   //
-  // This is the case that the batch boundary exists for, and the one an earlier
-  // implementation got wrong twice Ã¢â‚¬â€ first by slicing the value, then by reporting
-  // "more" when the boundary was the last row, which re-pushed the same page until the
-  // per-table page ceiling stopped it.
+  // `rate_limits` is the plan's natural fixture for this: its watermark is
+  // `window_start` and its primary key is `(bucket, window_start)`, so seven rows can
+  // share one watermark value while remaining distinct rows. (`throttle_events` cannot
+  // — its watermark *is* its primary key, so a shared watermark is impossible there by
+  // construction, which is exactly why it is the wrong table to test this on.)
+  //
+  // This is the case the batch boundary exists for, and the one an earlier
+  // implementation got wrong twice: first by slicing the value, then by reporting
+  // "more" when the boundary was already the last row, which re-pushed the same page
+  // until the per-table page ceiling stopped it.
+  const buckets = Array.from({ length: 7 }, (_, n) => `('b${n}',1000,1,1000)`);
   const h = await sqliteHarness(
     t,
-    [
-      `INSERT INTO throttle_events (id, domain, host, status, wait_ms, created_at) VALUES
-       (500,'x','ia',429,1,1000),(500+1,'x','ia',429,1,1001),(500+2,'x','ia',429,1,1002),
-       (500+3,'x','ia',429,1,1003),(500+4,'x','ia',429,1,1004),(500+5,'x','ia',429,1,1005),
-       (500+6,'x','ia',429,1,1006)`,
-    ],
+    [`INSERT INTO rate_limits (bucket, window_start, count, updated_at) VALUES ${buckets.join(",")}`],
     { env: { BACKUP_READ_BATCH: "3", BACKUP_PUSH_BATCH: "3" } },
   );
   if (!h) return;
 
-  // Rewrite every id to the same value, so `id` Ã¢â‚¬â€ the watermark Ã¢â‚¬â€ is genuinely shared.
-  h.raw.exec("UPDATE throttle_events SET id = 500");
-
-  const summary = await h.sync.run({ force: true });
+  const summary = await h.sync.run({ force: true, only: ["rate_limits"] });
 
   assert.deepEqual(summary.failures, []);
-  assert.equal(summary.rows, 7, "the whole shared value should be taken, not just the first 3");
-  assert.equal(h.supabase.mirror.get("throttle_events")?.length, 7);
-  assert.equal(Number(h.supabase.state.get("throttle_events")?.["last_cursor"]), 500);
+  // The seven seeded rows, plus the run's own lease row — which lives in this table and
+  // is therefore mirrored too. What matters is that *no row is lost*: all seven seeded
+  // buckets arrive even though they share one watermark value.
+  assert.ok(summary.rows >= 7, `expected at least the 7 shared rows, got ${summary.rows}`);
+  const mirrored = h.supabase.mirror.get("rate_limits") ?? [];
+  for (let n = 0; n < 7; n++) {
+    assert.ok(
+      mirrored.some((r) => r["bucket"] === `b${n}`),
+      `bucket b${n} was not mirrored — the shared watermark was sliced`,
+    );
+  }
+  assert.ok(Number(h.supabase.state.get("rate_limits")?.["last_cursor"]) >= 1000, "the cursor must reach at least the shared value");
 
-  const again = await h.sync.run({ force: true });
-  assert.equal(again.rows, 0, "re-reading a complete value must not duplicate or re-push it");
-  assert.equal(h.supabase.mirror.get("throttle_events")?.length, 7);
-  assert.equal(h.supabase.pushedRows("throttle_events").length, 7, "no row should be pushed twice");
+  // A second run must not grow the mirror. It re-reads the boundary value once (the
+  // first page of a run is inclusive, for at-least-once) and then stops, so the repeat
+  // is an upsert of rows already present rather than new rows.
+  const mirroredBefore = (h.supabase.mirror.get("rate_limits") ?? []).length;
+  const again = await h.sync.run({ force: true, only: ["rate_limits"] });
+  assert.equal(
+    (h.supabase.mirror.get("rate_limits") ?? []).length,
+    mirroredBefore,
+    "a no-op run added rows to the mirror",
+  );
+  const distinctBuckets = new Set(
+    (h.supabase.mirror.get("rate_limits") ?? []).map((r) => r["bucket"]),
+  );
+  assert.equal(distinctBuckets.size, mirroredBefore, "the mirror holds duplicate keys");
+  assert.ok(again.rows <= 7, `a no-op run should re-push at most one shared value, got ${again.rows}`);
 });
 
 test("a large table is mirrored across several pages in one run", async (t) => {
@@ -935,7 +980,8 @@ test("a large table is mirrored across several pages in one run", async (t) => {
 
   const summary = await h.sync.run({ force: true });
   assert.deepEqual(summary.failures, []);
-  assert.equal(summary.rows, 25);
+  // 25 seeded rows, plus whatever `rate_limits` carries from this run's lease.
+  assert.ok(summary.rows >= 25, `expected at least 25 rows, got ${summary.rows}`);
   const result = summary.tables.find((x) => x.table === "usage_ledger");
   assert.ok(result && result.batches >= 3, `expected 3+ batches, got ${result?.batches}`);
   assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 25);
@@ -943,16 +989,25 @@ test("a large table is mirrored across several pages in one run", async (t) => {
 });
 
 test("a failed push leaves the cursor where it started so rows are never skipped", async (t) => {
-  const h = await sqliteHarness(t, [
-    `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
-     VALUES (10,'x','2024-03','ia_fetch',1,1000),(11,'x','2024-03','ia_fetch',1,1001),
-            (12,'x','2024-03','ia_fetch',1,1002),(13,'x','2024-03','ia_fetch',1,1003)`,
-  ]);
+  // The clock advances between runs because the lease is a window derived from it: two
+  // runs at one instant are correctly treated as concurrent, and the second would be
+  // refused before reaching the push this test is about.
+  let clock = 1_700_000_000;
+  const h = await sqliteHarness(
+    t,
+    [
+      `INSERT INTO usage_ledger (id, domain, month, kind, value, recorded_at)
+       VALUES (10,'x','2024-03','ia_fetch',1,1000),(11,'x','2024-03','ia_fetch',1,1001),
+              (12,'x','2024-03','ia_fetch',1,1002),(13,'x','2024-03','ia_fetch',1,1003)`,
+    ],
+    { now: () => clock },
+  );
   if (!h) return;
 
   // First run succeeds and commits the cursor.
   await h.sync.run({ force: true });
   assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 13);
+  clock += 600;
 
   // New rows, and this time PostgREST refuses them with a non-retryable error.
   h.raw.exec(
@@ -977,9 +1032,14 @@ test("a failed push leaves the cursor where it started so rows are never skipped
   assert.match(String(state["last_error"]), /23502/);
 
   // The next run reads from 13 again and succeeds.
-  const recovered = await h.sync.run({ force: true });
+  clock += 600;
+  const recovered = await h.sync.run({ force: true, only: ["usage_ledger"] });
   assert.deepEqual(recovered.failures, []);
-  assert.equal(recovered.rows, 8, "the previously refused rows were not re-read");
+  // Row 13 was already mirrored, but the inclusive first page re-reads it — the
+  // at-least-once contract — so the recovered run carries 13's row plus the four new
+  // ones. What matters is that nothing the mirror refused was skipped.
+  const recoveredLedger = recovered.tables.find((x) => x.table === "usage_ledger");
+  assert.equal(recoveredLedger?.rows, 5, `recovered detail: ${JSON.stringify(recoveredLedger)}`);
   assert.equal(Number(h.supabase.state.get("usage_ledger")?.["last_cursor"]), 23);
 });
 
@@ -1222,12 +1282,16 @@ test("the generated read query advances a cursor over rows that share a watermar
 
   // Walk the cursor the way `BackupSync` does: read a batch, take the highest `__wm`
   // it carried as the next cursor, stop when the statement says there is no more.
+  //
+  // `strict` after the first pass, because that is what the syncer does and what makes
+  // the walk terminate: the boundary value is re-read inclusively only once per run, and
+  // re-reading it on every pass is the livelock (`> ` vs `>=`) this test exists to catch.
   const seen = new Set<string>();
   let cursor = "0";
 
   for (let pass = 0; pass < 20; pass++) {
     const rows = raw
-      .prepare(d1ReadSql(plan, batchSize))
+      .prepare(d1ReadSql(plan, batchSize, { strict: pass > 0 }))
       .all(...d1ReadParams(plan, cursor)) as BackupRow[];
     if (rows.length === 0) break;
 
@@ -1306,9 +1370,10 @@ test("the batch says there is more, so a full batch is not mistaken for the end"
     "a capped batch must report that more rows follow Ã¢â‚¬â€ a row count cannot tell the difference",
   );
 
-  // The second batch finishes, and reports the end.
+  // The second batch continues strictly above the boundary, which is what makes the
+  // walk terminate, and reports the end.
   const second = raw
-    .prepare(d1ReadSql(plan, 2))
+    .prepare(d1ReadSql(plan, 2, { strict: true }))
     .all(...d1ReadParams(plan, String(first[first.length - 1]!["__wm"]))) as BackupRow[];
   assert.equal(second.length, 2);
   assert.equal(second[second.length - 1]!["__more"], null);
