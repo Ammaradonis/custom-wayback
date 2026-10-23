@@ -30,6 +30,93 @@ export const viewerRouter = new Hono<{ Bindings: Env }>();
 
 // ── Serve archived page ───────────────────────────────────────────────────────
 
+interface SnapshotRow {
+  id: string;
+  r2_key: string | null;
+  ts: string;
+  resolved_day: string | null;
+  delta_days: number | null;
+  purged_at: number | null;
+  served_at: number | null;
+}
+
+/**
+ * The ledger row for one route on one day, or null.
+ *
+ * ## Why this matches `page_id` and not `url LIKE '%…'`
+ *
+ * It used to be `WHERE domain = ? AND day = ? AND url LIKE ?` with `%\${path}`. That
+ * has two defects, and both were live:
+ *
+ *   1. **It matches the wrong row.** `LIKE '%/about'` matches
+ *      `https://example.com/team/about` as readily as `https://example.com/about`, so a
+ *      request could be answered with a different page's bytes under the requested
+ *      URL.
+ *   2. **It cannot find the right row when the path is `/`.** `LIKE '%/'` only matches
+ *      URLs that *end* in a slash, which is fine for a homepage and useless for
+ *      everything else, so a request for a page stored without a trailing slash
+ *      missing its own row and fell through to the 404.
+ *
+ * `page_id` is the route the ingest wrote for exactly this purpose (`pageIdFor` in
+ * `queue/ingest.ts`): the path plus the percent-encoded query. Matching it is an
+ * equality on the same key the URL uses, which is both correct and cheap.
+ *
+ * `url LIKE` survives only as the fallback for rows written before `page_id` was
+ * populated, and the `mime` ordering keeps a legacy asset row (an image stored as a
+ * page by an older crawl) from shadowing a real HTML capture on the same route.
+ */
+async function findSnapshot(
+  env: Env,
+  domain: string,
+  day: string,
+  pageId: string,
+): Promise<SnapshotRow | null> {
+  const byRoute = await env.DB.prepare(
+    `SELECT id, r2_key, ts, resolved_day, delta_days, purged_at, served_at
+     FROM snapshots
+     WHERE domain = ? AND day = ? AND page_id = ?
+     ORDER BY (mime LIKE 'text/html%') DESC, ts ASC
+     LIMIT 1`,
+  )
+    .bind(domain, day, pageId)
+    .first<SnapshotRow>();
+  if (byRoute) return byRoute;
+
+  // Legacy rows: `page_id` was added by a later migration, so an older crawl's rows
+  // have it NULL and are only addressable by URL.
+  return env.DB.prepare(
+    `SELECT id, r2_key, ts, resolved_day, delta_days, purged_at, served_at
+     FROM snapshots
+     WHERE domain = ? AND day = ? AND page_id IS NULL AND url LIKE ?
+     ORDER BY (mime LIKE 'text/html%') DESC, ts ASC
+     LIMIT 1`,
+  )
+    .bind(domain, day, `%${pageId}`)
+    .first<SnapshotRow>();
+}
+
+/** The closest day to `day` that has a capture of `pageId`, within `windowDays`. */
+async function nearestDay(
+  env: Env,
+  domain: string,
+  day: string,
+  pageId: string,
+  windowDays = 62,
+): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT day
+     FROM snapshots
+     WHERE domain = ? AND page_id = ?
+       AND ABS(julianday(day) - julianday(?)) <= ?
+       AND mime LIKE 'text/html%'
+     ORDER BY ABS(julianday(day) - julianday(?)) ASC, day ASC
+     LIMIT 1`,
+  )
+    .bind(domain, pageId, day, windowDays, day)
+    .first<{ day: string }>();
+  return row?.day ?? null;
+}
+
 viewerRouter.get("/:domain/:day/*", async (c) => {
   const { domain, day } = c.req.param();
 
@@ -43,26 +130,37 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
     ? rawPath.slice(prefix.length) || "/"
     : "/";
 
-  // 1. Look up the snapshot ledger.
-  const snap = await c.env.DB.prepare(
-    `SELECT id, r2_key, ts, resolved_day, delta_days, purged_at, served_at
-     FROM snapshots
-     WHERE domain = ? AND day = ? AND url LIKE ?
-     LIMIT 1`,
-  )
-    .bind(domain, day, `%${path}`)
-    .first<{
-      id: string;
-      r2_key: string | null;
-      ts: string;
-      resolved_day: string | null;
-      delta_days: number | null;
-      purged_at: number | null;
-      served_at: number | null;
-    }>();
+  // 1. Look up the snapshot ledger for this exact route.
+  let snap = await findSnapshot(c.env, domain, day, path);
 
-  // 2. Nearest-capture redirect if no snapshot for this exact day.
+  // 2. Never a dead end (plan.md §2.3). Before answering 404, look for something
+  //    honest to show instead of nothing:
+  //
+  //      a. the same day's *homepage*, when a deeper page is missing;
+  //      b. the nearest day that captured this page at all;
+  //      c. the nearest day that captured the homepage.
+  //
+  //    Each is a redirect, so the toolbar and URL bar end up describing what is
+  //    actually on screen. The old behaviour — a bare "No capture found for this
+  //    page." — was the failure the plan explicitly rules out, and it is what a
+  //    visitor saw for every deep link and every asset-only month.
   if (!snap) {
+    if (path !== "/") {
+      const rootToday = await findSnapshot(c.env, domain, day, "/");
+      if (rootToday) return c.redirect(`/a/${domain}/${day}/`, 302);
+    }
+
+    const otherDay = path === "/" ? null : await nearestDay(c.env, domain, day, path);
+    if (otherDay) return c.redirect(`/a/${domain}/${otherDay}${path}`, 302);
+
+    const rootElsewhere = await nearestDay(c.env, domain, day, "/");
+    if (rootElsewhere && rootElsewhere !== day) {
+      return c.redirect(`/a/${domain}/${rootElsewhere}/`, 302);
+    }
+
+    // The link-resolution ledger carries the nearest capture the *crawl* recorded,
+    // which covers links that were resolved at ingest time but never stored as a
+    // snapshot of their own.
     if (c.env.SNAPSHOT_BEHAVIOR === "nearest") {
       const nearest = await c.env.DB.prepare(
         `SELECT resolved_day FROM link_resolutions
@@ -75,7 +173,16 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
         return c.redirect(`/a/${domain}/${nearest.resolved_day}${path}`, 302);
       }
     }
-    return new Response("No capture found for this page.", { status: 404 });
+
+    // The one honest 404 left. It says what was asked for and what to do next rather
+    // than leaving a bare wall (§2.3 "errors are designed").
+    return new Response(
+      `No capture of https://${domain}${path} on ${day} was found, and there is no nearby ` +
+        `capture to fall back to. Try another day from the picker, or re-run the crawl for ` +
+        `this month — an asset-only month (images but no HTML page) means the survey is ` +
+        `returning the wrong captures.\n`,
+      { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+    );
   }
 
   // 3. If content already purged, do an on-demand id_ fetch.

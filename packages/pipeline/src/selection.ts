@@ -19,7 +19,17 @@
  * Tie-breaking is total, so re-running a crawl reproduces the same choices.
  */
 
-import { canonicalize, daysBetween, pathDepth, hashString } from './urlutil.js';
+import {
+  canonicalize,
+  daysBetween,
+  extensionOf,
+  hashString,
+  pathDepth,
+  FONT_EXT,
+  IMAGE_EXT,
+  SCRIPT_EXT,
+  STYLE_EXT,
+} from './urlutil.js';
 import type { CdxRow } from './wayback.js';
 
 export interface SelectedPage {
@@ -55,10 +65,75 @@ const NON_PAGE_PATHS: RegExp[] = [
   /\.(xml|json|txt|rss|atom)$/i,
 ];
 
-export function isNavigablePage(urlStr: string): boolean {
+/**
+ * Media types that are never a page, whatever the URL looks like.
+ *
+ * Checked in addition to the file extension because archive.org's `mimetype` and the
+ * URL do not always agree: an image served by a script endpoint has no extension, and
+ * a misconfigured server reports `text/html` for things that are not pages. Either
+ * signal is enough to rule a URL out.
+ */
+const NON_PAGE_MIME =
+  /^(image\/|audio\/|video\/|font\/|text\/css|text\/javascript|application\/(javascript|ecmascript|json|xml|x-javascript|font|zip|zip-compressed|gzip|pdf|octet-stream|x-shockwave-flash)|application\/vnd\.)/i;
+
+/** Extensions that are always assets, never pages. */
+const NON_PAGE_EXTENSIONS = new Set([
+  ...IMAGE_EXT,
+  ...STYLE_EXT,
+  ...SCRIPT_EXT,
+  ...FONT_EXT,
+  'map',
+  'pdf',
+  'zip',
+  'gz',
+  'tgz',
+  'rar',
+  '7z',
+  'mp3',
+  'ogg',
+  'wav',
+  'mp4',
+  'webm',
+  'mov',
+  'avi',
+  'json',
+  'xml',
+  'txt',
+  'csv',
+]);
+
+/**
+ * Is this capture a page a visitor can open, as opposed to an asset?
+ *
+ * ## Why the extension check is not redundant with the CDX mimetype filter
+ *
+ * `htmlSurvey` now asks archive.org for `mimetype:text/html`, so assets should not
+ * reach this function at all. But they did reach it for months, and the result was
+ * crawls whose entire ledger consisted of `/arrows.png`-style rows: the page plan
+ * filled with images, the site's real HTML either pushed out of the row budget or
+ * never fetched, and `/a/<domain>/<day>/` answering 404 because no row's URL ends in
+ * a `/`. A viewer with no pages is the product being dead.
+ *
+ * So this refuses an asset on *either* signal — extension or declared type — and the
+ * misclassification becomes a skipped row rather than an unroutable one.
+ *
+ * Extension-less URLs are still treated as pages: image CDNs and analytics-free
+ * endpoints like `/p/12345` are ordinary routes, and rejecting them would lose real
+ * pages. The mime argument, when present, resolves those cases.
+ */
+export function isNavigablePage(urlStr: string, mime?: string): boolean {
   try {
     const url = new URL(urlStr);
-    return !NON_PAGE_PATHS.some((re) => re.test(url.pathname));
+    if (NON_PAGE_PATHS.some((re) => re.test(url.pathname))) return false;
+    if (NON_PAGE_EXTENSIONS.has(extensionOf(urlStr))) return false;
+    // `text/html; charset=utf-8` is a page; `text/html` from CDX is a page. Anything
+    // that declares itself an asset is not, but an *unknown* type is given the benefit
+    // of the doubt — archive.org reports `unk` and empty strings routinely, and
+    // dropping those would discard real pages.
+    if (mime && mime.trim().length > 0 && mime !== 'unk' && NON_PAGE_MIME.test(mime.trim())) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -90,7 +165,10 @@ export function selectPages(rows: CdxRow[], mode: 'perday' | 'anchor', seedUrl: 
     if (row.status !== 200) continue;
     const canonical = canonicalize(row.url);
     if (!canonical) continue;
-    if (!isNavigablePage(canonical)) continue;
+    // The row's declared type is passed through: with `mimetype:text/html` in the
+    // survey this is belt and braces, but it is what catches an asset that archive.org
+    // labelled as HTML.
+    if (!isNavigablePage(canonical, row.mime)) continue;
     let list = byUrl.get(canonical);
     if (!list) {
       list = [];

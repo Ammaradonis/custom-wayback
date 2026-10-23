@@ -32,6 +32,7 @@ import {
   hashString,
   htmlSurvey,
   parseCdxJson,
+  seedUrlSurvey,
   selectPages as pipelineSelectPages,
   type CdxRow,
 } from "@custom-wayback/pipeline";
@@ -312,6 +313,38 @@ class UsageBatch {
 
 // ── Stage: survey ────────────────────────────────────────────────────────────
 
+/**
+ * Best-effort rows for the homepage alone, used when the domain-wide survey failed.
+ *
+ * Non-fatal by design: this is the *last* thing keeping a degraded crawl useful, so a
+ * failure here returns no rows rather than throwing and turning a partial month into a
+ * crashed job. The caller decides what to do with an empty result.
+ */
+async function fetchSeedRows(
+  fetcher: CloudFetcher,
+  seedUrl: string,
+  fromDay: string,
+  toDay: string,
+  usage: UsageBatch,
+): Promise<CdxRow[]> {
+  try {
+    const url = buildSurveyUrl(seedUrlSurvey(seedUrl, fromDay, toDay));
+    const outcome = await fetcher.fetch(url, {
+      accept: "application/json,text/plain,*/*",
+      // The measured table in `wayback.ts` says an exact-URL query returns in a few
+      // seconds; 30 s is generous for it and keeps a dead endpoint from stalling the
+      // job a second time.
+      timeoutMs: 30_000,
+    });
+    usage.add("ia_fetch", 1);
+    if (outcome.kind !== "ok") return [];
+    const parsed = parseCdxJson(new TextDecoder().decode(outcome.body));
+    return parsed.error ? [] : parsed.rows;
+  } catch {
+    return [];
+  }
+}
+
 async function runSurvey(
   env: Env,
   msg: IngestQueueMessage,
@@ -362,16 +395,58 @@ async function runSurvey(
     };
   }
   if (outcome.kind !== "ok") {
-    // A failed survey is not fatal: the job degrades to a seed-page-only crawl
-    // rather than reporting "failed" for something archive.org did.
+    // A failed survey is not fatal, but it must not be a silent dead end either.
+    //
+    // This branch used to write `pages_json = '[]'` and go straight to `finalize`,
+    // so a survey failure produced a crawl with zero pages and the comment above it
+    // claiming a "seed-page-only crawl". The visible result was a ready-looking
+    // ingest whose every route 404'd — the site appeared to be missing rather than
+    // partially captured.
+    //
+    // So: spend one more, much cheaper request on the homepage alone. A single-exact
+    // -URL query over the month is the one shape `wayback.ts` measures as reliably
+    // fast, and it is enough to make the month browsable from the front page.
     const reason = outcome.kind === "error" ? outcome.message : `HTTP ${outcome.status}`;
+    const seed = `https://${msg.domain}/`;
+    const fromDay = `${year}-${mon}-01`;
+    const toDay = `${year}-${mon}-${String(lastDay).padStart(2, "0")}`;
+
+    const seedRows = await fetchSeedRows(fetcher, seed, fromDay, toDay, usage);
+    const seedPlan = seedRows.length > 0 ? selectPages(seedRows, seed, 1) : [];
+
+    if (seedPlan.length > 0) {
+      const dayIndex: Record<string, Record<string, string>> = {};
+      for (const page of seedPlan) {
+        (dayIndex[page.url] ??= {})[page.day] = page.ts;
+      }
+      await env.DB.prepare(
+        `UPDATE ingests SET degraded_reason = ?, status = 'fetching', stage = 'pages',
+           pages_json = ?, day_index_json = ?, pages_total = ?, cursor = 0,
+           asset_cursor = 0, assets_json = '[]' WHERE id = ?`,
+      )
+        .bind(
+          `CDX survey unavailable (${reason}); captured the homepage only`,
+          JSON.stringify(seedPlan),
+          JSON.stringify(dayIndex),
+          seedPlan.length,
+          msg.ingestId,
+        )
+        .run();
+      return {
+        next: "pages",
+        status: "fetching",
+        note: `CDX survey failed (${reason}) — falling back to the homepage`,
+      };
+    }
+
     await env.DB.prepare(
-      `UPDATE ingests SET degraded_reason = ?, status = 'fetching', stage = 'pages',
-         pages_json = '[]', pages_total = 0, cursor = 0 WHERE id = ?`,
+      `UPDATE ingests SET degraded_reason = ?, status = 'failed', stage = 'done',
+         pages_json = '[]', pages_total = 0, pages_done = 0, cursor = 0,
+         finished_at = ? WHERE id = ?`,
     )
-      .bind(`CDX survey unavailable (${reason}); crawled nothing new`, msg.ingestId)
+      .bind(`no homepage capture for this month (CDX survey failed: ${reason})`, Math.floor(Date.now() / 1000), msg.ingestId)
       .run();
-    return { next: "finalize", status: "fetching", note: `CDX survey failed: ${reason}` };
+    return { next: null, status: "failed", note: `CDX survey failed: ${reason}` };
   }
 
   const parsed = parseCdxJson(new TextDecoder().decode(outcome.body));

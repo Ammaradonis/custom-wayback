@@ -58,7 +58,12 @@ export interface CdxRow {
 
 export interface SurveySpec {
   label: string;
-  params: Record<string, string>;
+  /**
+   * CDX query parameters. A value may be an array, which is emitted as a repeated
+   * parameter — that is the only way to express more than one `filter`, and CDX
+   * ANDs them.
+   */
+  params: Record<string, string | string[]>;
 }
 
 export interface SurveyProgress {
@@ -87,6 +92,23 @@ export function buildReplayUrl(timestamp: string, originalUrl: string): string {
  * CDX query for HTML page captures in the window.
  * Note the deliberate absence of `collapse` and `showResumeKey`: both force full scans.
  * Day selection happens client-side in ledger.ts instead, which is free.
+ *
+ * ## Why `filter=mimetype:text/html` is not optional
+ *
+ * Without it this query returns *every* capture type under the domain — PNGs, CSS,
+ * JS, fonts, media — and with a row budget it fills up with assets before it reaches
+ * the site's actual pages. The downstream page selector then has to guess which rows
+ * are pages, and every asset it guesses wrong about becomes a "page" row in the
+ * ledger with a `/…png` route that can never render. That is the failure this filter
+ * removes at the source: the ingest asks archive.org for pages and gets pages.
+ *
+ * It is also cheaper for archive.org, not just more correct: the filter is applied
+ * while scanning, so fewer rows are serialised and the range query that was timing
+ * out at 45 s has far less work to do.
+ *
+ * `filter=statuscode:200` stays because a capture of an error page is not a page;
+ * `selectPages` also re-checks the status, but filtering server-side means the row
+ * budget is spent on usable captures.
  */
 export function htmlSurvey(domain: string, from: string, to: string, limit: number): SurveySpec {
   return {
@@ -96,7 +118,7 @@ export function htmlSurvey(domain: string, from: string, to: string, limit: numb
       matchType: 'domain',
       from,
       to,
-      filter: 'statuscode:200',
+      filter: ['statuscode:200', 'mimetype:text/html'],
       limit: String(limit),
     },
   };
@@ -123,7 +145,12 @@ export function assetSurvey(domain: string, from: string, to: string, limit: num
 
 export function buildSurveyUrl(spec: SurveySpec): string {
   const usp = new URLSearchParams();
-  for (const [k, v] of Object.entries(spec.params)) usp.append(k, v);
+  for (const [k, v] of Object.entries(spec.params)) {
+    // Arrays become repeated parameters: CDX ANDs repeated `filter` values, and
+    // `URLSearchParams.append` in a loop is the only way to emit them.
+    if (Array.isArray(v)) for (const one of v) usp.append(k, one);
+    else usp.append(k, v);
+  }
   usp.append('output', 'json');
   usp.append('fl', 'timestamp,original,mimetype,statuscode,digest,length');
   return `${CDX_ENDPOINT}?${usp.toString()}`;
@@ -145,8 +172,33 @@ export function exactUrlSurvey(url: string, day: string): SurveySpec {
       matchType: 'exact',
       from: `${day.replace(/-/g, '')}000000`,
       to: `${day.replace(/-/g, '')}235959`,
-      filter: 'statuscode:200',
+      filter: ['statuscode:200', 'mimetype:text/html'],
       limit: '20',
+    },
+  };
+}
+
+/**
+ * The homepage over the whole window — the fallback plan when a domain-wide survey
+ * fails.
+ *
+ * A domain-wide month query is the expensive shape (see the measured table at the top
+ * of this file): it is the one that hangs to 60 s and 504s. Asking for one exact URL
+ * over the same window is orders of magnitude cheaper, and it is enough to answer the
+ * only question that still matters when the survey is dead — *when was this site's
+ * front page captured this month?* — so a degraded crawl can still show something
+ * instead of an empty ledger.
+ */
+export function seedUrlSurvey(url: string, fromDay: string, toDay: string, limit = 200): SurveySpec {
+  return {
+    label: `seed:${new URL(url).pathname || '/'}`,
+    params: {
+      url,
+      matchType: 'exact',
+      from: `${fromDay.replace(/-/g, '')}000000`,
+      to: `${toDay.replace(/-/g, '')}235959`,
+      filter: ['statuscode:200', 'mimetype:text/html'],
+      limit: String(limit),
     },
   };
 }
