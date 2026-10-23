@@ -44,6 +44,16 @@ export function stripTracking(url: URL): URL {
 /**
  * Canonical form used as the ledger key: host lowercased, default port dropped,
  * tracking params removed, params sorted, fragment dropped.
+ *
+ * ## Credentials in the URL are dropped
+ *
+ * `http://email@example.com/` was in the live ledger next to `https://example.com/` and
+ * `http://example.com/`: three rows for one page, because archive.org's index contains
+ * captures crawled from a URL that carried userinfo. Two URLs that differ only in
+ * `user:pass@` fetch the same resource — the userinfo is transport credentials, not
+ * addressing — so keeping it in the key means the same page is crawled, stored and
+ * counted repeatedly, and the day picker shows a duplicate. Removing it is also the
+ * safer default: a mirror should not carry credentials forward into its own routes.
  */
 export function canonicalize(input: string | URL, base?: string): string | undefined {
   let url: URL;
@@ -54,6 +64,8 @@ export function canonicalize(input: string | URL, base?: string): string | undef
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
   url.hash = '';
+  url.username = '';
+  url.password = '';
   url.hostname = url.hostname.toLowerCase();
   if ((url.protocol === 'http:' && url.port === '80') || (url.protocol === 'https:' && url.port === '443')) {
     url.port = '';

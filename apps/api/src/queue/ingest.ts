@@ -314,6 +314,28 @@ class UsageBatch {
 // ── Stage: survey ────────────────────────────────────────────────────────────
 
 /**
+ * Is this capture an HTML document?
+ *
+ * Trusts the declared type when it says HTML, and otherwise sniffs the first bytes,
+ * because archive.org routinely reports `application/octet-stream` or `text/plain` for
+ * captures it does not have a type for. Only a positive answer lets a capture become a
+ * page row.
+ */
+function looksLikeHtml(contentType: string, body: ArrayBuffer | Uint8Array): boolean {
+  if (/html/i.test(contentType ?? "")) return true;
+  const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
+  // 1 KiB is enough to reach the doctype of every real page, and skips the binary
+  // signature check entirely for images, which is where the false positives were.
+  // No `fatal: false`: replace-on-invalid is already the default, and the Workers
+  // `TextDecoder` types do not accept the option.
+  const head = new TextDecoder("utf-8")
+    .decode(bytes.subarray(0, 1024))
+    .trimStart()
+    .toLowerCase();
+  return head.startsWith("<!doctype html") || head.startsWith("<html") || head.startsWith("<head") || head.startsWith("<body");
+}
+
+/**
  * Best-effort rows for the homepage alone, used when the domain-wide survey failed.
  *
  * Non-fatal by design: this is the *last* thing keeping a degraded crawl useful, so a
@@ -568,6 +590,23 @@ async function runPages(
     if (pageOutcome.kind !== "ok" || looksLikeWaybackError(pageOutcome.body, pageOutcome.contentType)) {
       // A capture that 404s or returns an archive.org error page is data, not an
       // exception: skip it and keep the crawl going.
+      done += 1;
+      continue;
+    }
+
+    // A "page" that is not HTML must not be stored as a page.
+    //
+    // The old crawler had no such check, and the live ledger proves the result: five
+    // `…/arrows.png`-style captures for university.com, each stored with
+    // `mime = 'text/html'` because this insert hard-codes that value. They became
+    // ledger rows whose route no browser ever requests, so the month showed five
+    // "pages" in the manifest, and `/a/university.com/<day>/` answered 404 — or, worse
+    // now that there is a fallback, redirected to a PNG rendered as a document.
+    //
+    // The mime comes from the upstream response and the bytes are sniffed, because
+    // archive.org serves some captures as `application/octet-stream` or `text/plain`
+    // when its own index has no type for them.
+    if (!looksLikeHtml(pageOutcome.contentType, pageOutcome.body)) {
       done += 1;
       continue;
     }

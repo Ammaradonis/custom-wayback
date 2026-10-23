@@ -130,6 +130,14 @@ test('canonicalize normalises host, port, tracking params and fragment', () => {
   assert.equal(canonicalize('not a url'), undefined);
 });
 
+test('canonicalize drops credentials so one page has one ledger key', () => {
+  // The live ledger held `http://email@example.com/` alongside `http://example.com/`
+  // and `https://example.com/`: three rows for one page, because a capture was crawled
+  // from a URL carrying userinfo. Credentials are transport, not addressing.
+  assert.equal(canonicalize('http://email@example.com/'), 'http://example.com/');
+  assert.equal(canonicalize('https://user:secret@example.com/a'), 'https://example.com/a');
+});
+
 test('sameSite treats subdomains and CDNs as one site', () => {
   assert.ok(sameSite('https://images.example.com/a.png', 'https://www.example.com/'));
   assert.ok(sameSite('https://www.example.co.uk/', 'https://shop.example.co.uk/x'));

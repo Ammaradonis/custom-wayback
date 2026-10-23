@@ -15,6 +15,7 @@ import {
   formNeutralisation,
   headInjection,
   isForeignBase,
+  isNavigablePage,
   isStrippedMeta,
   scriptDisposition,
   snapshotCsp,
@@ -117,6 +118,58 @@ async function nearestDay(
   return row?.day ?? null;
 }
 
+/**
+ * The closest day that has *any* HTML capture, used when the requested day has none.
+ *
+ * Deliberately looser than `nearestDay`: that one needs a capture of a specific route,
+ * and a day whose only HTML page is, say, the homepage under a query string has no
+ * `page_id = '/'` to match. This asks the weaker question — "is there anything to show
+ * near here?" — which is the one that stops a date picker from dead-ending on a day
+ * between two captures.
+ */
+async function nearestHtmlDay(
+  env: Env,
+  domain: string,
+  day: string,
+  windowDays = 62,
+): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT day
+     FROM snapshots
+     WHERE domain = ? AND mime LIKE 'text/html%'
+       AND ABS(julianday(day) - julianday(?)) <= ?
+     ORDER BY ABS(julianday(day) - julianday(?)) ASC, day ASC
+     LIMIT 1`,
+  )
+    .bind(domain, day, windowDays, day)
+    .first<{ day: string }>();
+  return row?.day && row.day !== day ? row.day : null;
+}
+
+/**
+ * The shallowest HTML capture of `day` that is a real route, or null.
+ *
+ * `isNavigablePage` and not just the SQL filter: rows written by the old crawler carry
+ * `mime = 'text/html'` even when the URL is `…/arrows.png`, because the insert hard-coded
+ * that value. Redirecting to one of those would serve an image as a document. The URL is
+ * the reliable signal.
+ */
+async function shallowestHtmlPage(env: Env, domain: string, day: string): Promise<string | null> {
+  const rows = await env.DB.prepare(
+    `SELECT page_id FROM snapshots
+     WHERE domain = ? AND day = ? AND mime LIKE 'text/html%' AND page_id IS NOT NULL
+     ORDER BY LENGTH(page_id) ASC, ts ASC
+     LIMIT 10`,
+  )
+    .bind(domain, day)
+    .all<{ page_id: string }>();
+
+  const found = (rows.results ?? []).find((row) =>
+    isNavigablePage(`https://${domain}${row.page_id}`),
+  );
+  return found?.page_id ?? null;
+}
+
 viewerRouter.get("/:domain/:day/*", async (c) => {
   const { domain, day } = c.req.param();
 
@@ -158,25 +211,22 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
       return c.redirect(`/a/${domain}/${rootElsewhere}/`, 302);
     }
 
-    // Nothing matched the requested route at all — but the day may still have *some*
-    // HTML. Open the shallowest capture of the day and let the visitor navigate from
-    // there.
+    // Nothing matched the requested route. Before giving up, open the shallowest HTML
+    // page that *does* exist — this day first, then the nearest day that has one.
     //
-    // This exists because a homepage is frequently captured with a query string
-    // (`https://www.university.com/?a=ctjzgrgkbb` was the only HTML capture of its day
-    // in the live archive). Its route is `/%3Fa=ctjzgrgkbb`, which no request for `/`
-    // will ever ask for, so without this the month is browsable in the ledger and shows
-    // a 404 in the browser.
-    const anyHtml = await c.env.DB.prepare(
-      `SELECT page_id FROM snapshots
-       WHERE domain = ? AND day = ? AND mime LIKE 'text/html%' AND page_id IS NOT NULL
-       ORDER BY LENGTH(page_id) ASC, ts ASC
-       LIMIT 1`,
-    )
-      .bind(domain, day)
-      .first<{ page_id: string }>();
-    if (anyHtml?.page_id) {
-      return c.redirect(`/a/${domain}/${day}${anyHtml.page_id}`, 302);
+    // This is what makes a month browsable at all when a site's homepage is captured
+    // under an unexpected route. In the live archive the only HTML capture of
+    // university.com's day was `https://www.university.com/?a=ctjzgrgkbb`, whose route
+    // is `/%3Fa=ctjzgrgkbb`; no request for `/` will ever ask for it, so without this
+    // the ledger holds a real page and the browser shows 404.
+    //
+    // Same day first, because a day picker that silently shows a different day is
+    // confusing; the nearest day is the fallback for a day with no capture at all.
+    for (const candidateDay of [day, await nearestHtmlDay(c.env, domain, day)]) {
+      if (!candidateDay) continue;
+      const pageId = await shallowestHtmlPage(c.env, domain, candidateDay);
+      if (!pageId) continue;
+      return c.redirect(`/a/${domain}/${candidateDay}${pageId}`, 302);
     }
 
     // The link-resolution ledger carries the nearest capture the *crawl* recorded,
@@ -198,10 +248,10 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
     // The one honest 404 left. It says what was asked for and what to do next rather
     // than leaving a bare wall (§2.3 "errors are designed").
     return new Response(
-      `No capture of https://${domain}${path} on ${day} was found, and there is no nearby ` +
-        `capture to fall back to. Try another day from the picker, or re-run the crawl for ` +
-        `this month — an asset-only month (images but no HTML page) means the survey is ` +
-        `returning the wrong captures.\n`,
+      `No capture of https://${domain}${path} on ${day} was found, and this month has no ` +
+        `HTML capture to fall back to. Start (or re-run) the crawl for this month: a month ` +
+        `whose ledger holds only images means the CDX survey returned assets instead of ` +
+        `pages, which the current crawler no longer does.\n`,
       { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } },
     );
   }
