@@ -897,9 +897,30 @@ export async function fetchOnDemand(
 
 // ── Toolbar headers ───────────────────────────────────────────────────────────
 
-const MAX_ON_DEMAND_RESOURCES = 120;
-
-/** Build a local resource URL while preserving fragments used by SVG sprites. */
+/**
+ * Build a local resource URL while preserving fragments used by SVG sprites.
+ *
+ * ## There is deliberately no cap here
+ *
+ * There used to be: `MAX_ON_DEMAND_RESOURCES = 120`, and once a page had referenced 120
+ * distinct resources every further URL was returned **unchanged**. Unchanged means it
+ * points at the live host, which the snapshot's CSP blocks — so past the 120th reference
+ * the page's images, stylesheets and scripts silently broke. Measured on
+ * `www.walmart.com`: exactly 120 distinct proxied URLs, with 66 `<img>` tags in the
+ * document, so a large share of its imagery was dead.
+ *
+ * A cap on *rewriting* buys nothing. Rewriting is a string transformation during the
+ * stream — the page's size is unchanged by a few hundred more attributes, and the cost of
+ * a resource is paid only if the browser requests it, at which point `/_cw/resource`
+ * serves it through the same cache and the same politeness budget as any other request.
+ * The browser fetches what it displays; a page that references 400 images does not cause
+ * 400 fetches on a phone. So the only effect of the cap was to break the tail of a
+ * modern page's assets.
+ *
+ * `budget` remains, because it de-duplicates: the same URL appearing in `src`, `srcset`
+ * and a CSS `url()` is mapped once, which keeps the generated markup identical for
+ * identical input.
+ */
 function onDemandResourceUrl(raw: string, base: string, ts: string, budget: Set<string>): string {
   const value = raw.trim();
   if (!value || /^(?:data|blob|javascript):/i.test(value) || value.startsWith("#")) return raw;
@@ -910,7 +931,6 @@ function onDemandResourceUrl(raw: string, base: string, ts: string, budget: Set<
     const fragment = target.hash;
     target.hash = "";
     const key = target.href;
-    if (!budget.has(key) && budget.size >= MAX_ON_DEMAND_RESOURCES) return raw;
     budget.add(key);
     const query = new URLSearchParams({ ts, url: key });
     return `/_cw/resource?${query.toString()}${fragment}`;
