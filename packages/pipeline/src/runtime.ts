@@ -289,7 +289,9 @@ export const RUNTIME_SCRIPT = String.raw`
   history.pushState = function (state, title, url) {
     var route = viewerRouteFor(url);
     if (route) {
-      nativePushState.call(this, state, title, location.href);
+      // Store the new state without creating a duplicate iframe history entry;
+      // the outer viewer owns the visible page navigation and Back/Forward stack.
+      nativeReplaceState.call(this, state, title, location.href);
       report('cw:navigate', { url: route });
       return;
     }

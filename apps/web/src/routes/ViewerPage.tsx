@@ -211,11 +211,10 @@ export default function ViewerPage() {
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  // goRoute is defined in the same render scope; including it would cause
-  // the listener to be re-registered on every render. It reads only stable
-  // refs (navigate, setNavStack) so the stale-closure risk is negligible.
+  // The route params are explicit dependencies so this guard always uses the
+  // current viewer domain and date. State setters and navigate are stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navigate, showToast, day]);
+  }, [navigate, showToast, day, domain]);
 
   // Scroll active day into view in the day strip.
   useEffect(() => {
