@@ -1,0 +1,6 @@
+# Known false positives, by gitleaks fingerprint (commit:file:rule:line).
+#
+# ca63457 committed a placeholder test signing secret inline in precrawl.test.ts; it was
+# never a real secret, and the next commit replaced it with "x".repeat(48), the
+# convention the other tests follow so jwt-secret-inline has nothing to match.
+ca63457d7c8aa976c609f40c5ea3773924c8f2df:apps/api/test/precrawl.test.ts:jwt-secret-inline:176

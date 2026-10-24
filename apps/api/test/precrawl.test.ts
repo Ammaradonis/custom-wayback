@@ -173,7 +173,7 @@ async function harness(
         kv.delete(key);
       },
     },
-    JWT_SECRET: "a-test-secret-that-is-at-least-32-bytes-long",
+    JWT_SECRET: "x".repeat(48),
     CRAWLER_USER_AGENT: "CustomWaybackTestBot/1.0",
     SNAPSHOT_BEHAVIOR: "nearest",
     PURGE_GRACE_SECONDS: "1800",
