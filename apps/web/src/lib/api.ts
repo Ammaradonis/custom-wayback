@@ -270,6 +270,7 @@ export interface IngestProgressEvent {
   ia429Count?: number;
   attempts?: number;
   degradedReason?: string | null;
+  errorMessage?: string | null;
   throttle?: ThrottleState;
 }
 
@@ -313,28 +314,96 @@ export const ingest = {
 
 export function watchIngest(
   ingestId: string,
-  onEvent: (ev: unknown) => void,
-  onDone: () => void,
+  onEvent: (ev: IngestProgressEvent) => void,
+  onError: (error: Error) => void,
 ): () => void {
   const token = getToken();
-  if (!token) return () => void 0;
+  const controller = new AbortController();
+  if (!token) {
+    queueMicrotask(() => onError(new Error("You are signed out.")));
+    return () => controller.abort();
+  }
 
-  const es = new EventSource(`${BASE}/jobs/${ingestId}/events`);
+  let reportedError = false;
+  const reportError = (error: Error) => {
+    if (reportedError || controller.signal.aborted) return;
+    reportedError = true;
+    onError(error);
+  };
 
-  es.onmessage = (e) => {
-    const data = JSON.parse(e.data as string) as { type: string };
-    onEvent(data);
-    if (data.type === "done") {
-      es.close();
-      onDone();
+  void (async () => {
+    const response = await fetch(`${BASE}/jobs/${encodeURIComponent(ingestId)}/events`, {
+      headers: {
+        Accept: "text/event-stream",
+        Authorization: `Bearer ${token}`,
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      const message = payload?.error ?? `Progress stream failed (HTTP ${response.status}).`;
+      if (response.status === 401) {
+        clearToken();
+        window.location.href = "/login";
+      }
+      throw new ApiError(message, response.status, payload);
     }
-  };
-  es.onerror = () => {
-    es.close();
-    onDone();
-  };
 
-  return () => es.close();
+    if (!response.body) throw new Error("The progress stream did not return a readable response.");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let completed = false;
+
+    const dispatch = (frame: string): boolean => {
+      const data = frame
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).replace(/^ /, ""))
+        .join("\n");
+      if (!data) return false;
+
+      let event: IngestProgressEvent;
+      try {
+        event = JSON.parse(data) as IngestProgressEvent;
+      } catch {
+        throw new Error("The progress stream returned invalid event data.");
+      }
+      onEvent(event);
+      return event.type === "done";
+    };
+
+    try {
+      while (!completed && !controller.signal.aborted) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let separator = /\r?\n\r?\n/.exec(buffer);
+        while (separator && !completed) {
+          const frame = buffer.slice(0, separator.index);
+          buffer = buffer.slice(separator.index + separator[0].length);
+          completed = dispatch(frame);
+          separator = /\r?\n\r?\n/.exec(buffer);
+        }
+      }
+
+      if (!completed && buffer.trim()) completed = dispatch(buffer);
+      if (!completed && !controller.signal.aborted) {
+        reportError(new Error("The progress stream ended before the crawl finished."));
+      }
+    } finally {
+      if (completed || controller.signal.aborted) await reader.cancel().catch(() => void 0);
+      reader.releaseLock();
+    }
+  })().catch((error: unknown) => {
+    if (error instanceof Error && error.name === "AbortError") return;
+    reportError(error instanceof Error ? error : new Error(String(error)));
+  });
+
+  return () => controller.abort();
 }
 
 // ── Manifest / sites ─────────────────────────────────────────────────────────

@@ -225,7 +225,25 @@ ingestRouter.get("/:ingestId", async (c) => {
     .first<JobRow>();
   if (!row) return c.json({ error: "Not found" }, 404);
 
-  return c.json({ ...row, throttle: throttleStateOf(row) });
+  // Keep this response in the same camelCase contract as the SSE progress frames
+  // and `IngestJob` in the web client. D1 returns column names verbatim, so
+  // spreading `row` here used to leak snake_case fields that the UI silently read
+  // as `undefined`.
+  return c.json({
+    id: row.id,
+    status: row.status,
+    stage: row.stage,
+    pagesTotal: row.pages_total,
+    pagesDone: row.pages_done,
+    assetsTotal: row.assets_total,
+    assetsDone: row.assets_done,
+    bytesStored: row.bytes_stored,
+    ia429Count: row.ia_429_count,
+    errorMessage: row.error_message,
+    attempts: row.attempts,
+    degradedReason: row.degraded_reason,
+    throttle: throttleStateOf(row),
+  });
 });
 
 /** Human-readable throttle state — the UI shows this instead of a silent hang (§12.3). */
@@ -308,6 +326,7 @@ ingestRouter.get("/:ingestId/events", async (c) => {
       assetsDone: current.assets_done,
       bytesStored: current.bytes_stored,
       ia429Count: current.ia_429_count,
+      errorMessage: current.error_message,
       attempts: current.attempts,
       degradedReason: current.degraded_reason,
       throttle: throttleStateOf(current),

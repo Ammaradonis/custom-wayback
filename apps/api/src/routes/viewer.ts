@@ -11,6 +11,7 @@
 
 import { Hono, type Context } from "hono";
 import {
+  AVAILABILITY_ENDPOINT,
   HEAD_CONTRACT,
   formNeutralisation,
   headInjection,
@@ -186,6 +187,27 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
   // 1. Look up the snapshot ledger for this exact route.
   let snap = await findSnapshot(c.env, domain, day, path);
 
+  // 1b. A missing ledger row is a *cache miss*, not a dead end.
+  //
+  // ## Why this is here, before any fallback
+  //
+  // Nothing about reading a page ever required a crawl: archive.org serves the raw bytes
+  // of any capture, and this route already knows how to rewrite and serve them
+  // (`fetchOnDemand`). Requiring a ledger row first meant the app could show *nothing*
+  // until a crawl had succeeded — and the crawl is precisely the part archive.org
+  // throttles. In practice the viewer answered 404 for pages the Internet Archive would
+  // happily have served, which is the "View shows nothing" report.
+  //
+  // So: resolve the closest capture with one availability request and serve it. The
+  // crawl goes back to being an optimisation — warm pages from R2, cold ones from the
+  // archive — instead of a gate in front of the product.
+  if (!snap) {
+    const onDemandTs = await resolveOnDemandCapture(c.env, domain, day, path);
+    if (onDemandTs) {
+      return fetchOnDemand(domain, day, path, onDemandTs, c.env, null, 0);
+    }
+  }
+
   // 2. Never a dead end (plan.md §2.3). Before answering 404, look for something
   //    honest to show instead of nothing:
   //
@@ -280,6 +302,64 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
   // 5. Full cache miss — on-demand fetch.
   return fetchOnDemand(domain, day, path, snap.ts, c.env, snap.resolved_day, snap.delta_days);
 });
+
+/**
+ * The closest capture of one page enough to serve it on demand, or null.
+ *
+ * One availability request per (page, day), cached in KV: the answer is immutable
+ * history, so a repeat visit costs nothing and the viewer never re-probes a URL it has
+ * already asked about. A negative result is cached for a day, because "this page was
+ * never captured" is true until a new crawl says otherwise, but a re-crawl should not be
+ * blocked by a stale "no" for a week.
+ */
+async function resolveOnDemandCapture(
+  env: Env,
+  domain: string,
+  day: string,
+  path: string,
+): Promise<string | null> {
+  const stamp = day.replace(/-/g, "");
+  if (!/^\d{8}$/.test(stamp)) return null;
+
+  const key = `capture:${domain}${path}:${day}`;
+  try {
+    const cached = await env.COVERAGE_KV.get(key, "text");
+    if (cached) return cached === "-" ? null : cached;
+  } catch {
+    // KV is a cache; a miss or an error both mean "ask archive.org".
+  }
+
+  const target = `https://${domain}${path}`;
+  const probe = `${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(target)}&timestamp=${stamp}`;
+
+  let ts: string | null = null;
+  try {
+    const res = await fetch(probe, { headers: { "User-Agent": env.CRAWLER_USER_AGENT } });
+    if (res.ok) {
+      const body = (await res.json()) as {
+        archived_snapshots?: {
+          closest?: { available?: boolean; timestamp?: string; status?: string };
+        };
+      };
+      const closest = body.archived_snapshots?.closest;
+      // A capture of an error page is not a page worth serving.
+      if (closest?.available && closest.status === "200" && /^\d{14}$/.test(closest.timestamp ?? "")) {
+        ts = closest.timestamp ?? null;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  try {
+    await env.COVERAGE_KV.put(key, ts ?? "-", {
+      expirationTtl: ts ? 60 * 60 * 24 * 7 : 60 * 60 * 24,
+    });
+  } catch {
+    // Losing the cache entry only costs one extra probe next time.
+  }
+  return ts;
+}
 
 // ── On-demand id_ fetch ───────────────────────────────────────────────────────
 
