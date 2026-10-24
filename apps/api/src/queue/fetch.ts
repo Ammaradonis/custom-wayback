@@ -102,7 +102,17 @@ export class CloudFetcher {
   private lastStart = 0;
   onThrottle?: (info: { url: string; status: number; attempt: number; waitMs: number }) => void;
 
-  constructor(userAgent: string, budget: FetchBudget = DEFAULT_FETCH_BUDGET) {
+  constructor(
+    userAgent: string,
+    budget: FetchBudget = DEFAULT_FETCH_BUDGET,
+    /**
+     * Extra headers for archive.org requests — in practice the `Authorization: LOW …`
+     * pair. Kept as data rather than read from the environment inside this class so the
+     * politeness machinery stays testable without secrets, and so a caller that fetches a
+     * non-archive URL cannot accidentally attach credentials.
+     */
+    private readonly authHeaders: Record<string, string> = {},
+  ) {
     this.userAgent = userAgent;
     this.budget = budget;
   }
@@ -154,6 +164,11 @@ export class CloudFetcher {
             "User-Agent": this.userAgent,
             Accept: opts.accept ?? "*/*",
             "Accept-Encoding": "gzip, deflate",
+            // Archive.org credentials, when configured. Authenticated requests are
+            // accounted per account instead of per egress IP, which is the identity a
+            // Worker does not have — see `lib/archive-auth.ts` for the measurements
+            // that motivated this and for what is deliberately not implemented.
+            ...this.authHeaders,
           },
         });
 
@@ -167,11 +182,23 @@ export class CloudFetcher {
           this.lastWaitMs = decision.waitMs;
           this.onThrottle?.({ url, status: res.status, attempt, waitMs: decision.waitMs });
 
-          if (attempt === this.budget.maxAttempts || decision.breakNow) {
-            return { kind: "throttled", status: res.status, waitMs: decision.waitMs };
-          }
-          await sleep(decision.waitMs);
-          continue;
+          // ## 429 ends the attempt, immediately
+          //
+          // It used to sleep `waitMs` and retry inside this call. That is the wrong shape
+          // for the limit actually being hit. Measured 2026-10-24 with archive.org
+          // credentials configured: an apple.com crawl collected **26 backoff events and 9
+          // breaker trips, all 429 from `web.archive.org`**, and stored nothing. Replay
+          // rate-limits the *egress IP*, and a Worker's egress IP is shared with every
+          // other tenant on that edge node — so it is already hot before this app sends
+          // anything, and three requests two seconds apart read as one burst from one
+          // noisy client.
+          //
+          // Returning at once hands the decision to the queue, which retries the stage
+          // after `delaySeconds`. That spreads the same work over minutes instead of
+          // seconds and is the only pacing a shared IP can survive. The politeness policy
+          // still runs, so the delay grows with the streak and the breaker can still park
+          // the job.
+          return { kind: "throttled", status: res.status, waitMs: decision.waitMs };
         }
 
         if (res.status === 404 || res.status === 410) return { kind: "notfound", status: res.status };

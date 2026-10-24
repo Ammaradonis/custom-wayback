@@ -39,6 +39,16 @@ export interface Env {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
 
+  // -- Archive.org credentials (optional; see lib/archive-auth.ts) -------------
+  //
+  // Sent as `Authorization: LOW <access>:<secret>`. Archive.org accounts authenticated
+  // requests per account instead of per IP, which is the one identity a Worker lacks �
+  // the reason an anonymous crawl of a single homepage collected 12 backoff events and 8
+  // breaker trips without storing a page. Both halves are required; sending neither keeps
+  // the anonymous behaviour, which still works, just more slowly.
+  ARCHIVE_S3_ACCESS_KEY?: string;
+  ARCHIVE_S3_SECRET_KEY?: string;
+
   // ── Non-secret vars ──────────────────────────────────────────────────────
   CRAWLER_USER_AGENT: string;
   MAX_PAGES_PER_MONTH: string;

@@ -52,6 +52,7 @@ import {
 import type { Env } from "../env.js";
 import { serveCachedPage, markServed, mutableCopy } from "../lib/r2.js";
 import { WAYBACK_RAW_BASE } from "@custom-wayback/shared";
+import { archiveHeadersFor } from "../lib/archive-auth.js";
 
 /** The slice of `ExecutionContext` the viewer needs; tests pass a stub. */
 interface Deferrer {
@@ -951,7 +952,7 @@ export async function locateCapture(env: Env, options: LocateOptions): Promise<C
     let response: Response;
     try {
       response = await fetch(archiveUrl, {
-        headers: { "User-Agent": env.CRAWLER_USER_AGENT },
+        headers: archiveHeadersFor(archiveUrl, env, { "User-Agent": env.CRAWLER_USER_AGENT }),
         redirect: "manual",
       });
     } catch {
@@ -1015,7 +1016,7 @@ async function probeAvailability(
   const probe = async (target: string): Promise<{ ts: string; url: string } | null> => {
     try {
       const res = await fetch(`${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(target)}&timestamp=${stamp}`, {
-        headers: { "User-Agent": env.CRAWLER_USER_AGENT },
+        headers: archiveHeadersFor(`${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(target)}&timestamp=${stamp}`, env, { "User-Agent": env.CRAWLER_USER_AGENT }),
       });
       if (!res.ok) return null;
       const body = (await res.json()) as {
@@ -1867,7 +1868,7 @@ async function fetchArchivedResource(ts: string, target: string, env: Env): Prom
   let current = `${WAYBACK_RAW_BASE}/${ts}id_/${target}`;
   for (let redirects = 0; redirects <= MAX_ARCHIVE_HOPS; redirects++) {
     const response = await fetch(current, {
-      headers: { "User-Agent": env.CRAWLER_USER_AGENT },
+      headers: archiveHeadersFor(current, env, { "User-Agent": env.CRAWLER_USER_AGENT }),
       redirect: "manual",
     });
     if (!REDIRECT_STATUSES.has(response.status)) return response;

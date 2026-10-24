@@ -24,6 +24,7 @@ import type { Env } from "../env.js";
 import { CloudFetcher, BudgetExhausted, looksLikeWaybackError, recordThrottle } from "./fetch.js";
 import { rewriteHtml, extractReferences, assetPath, type PageRewriteResult } from "./rewrite.js";
 import { indexStatements } from "../lib/index-page.js";
+import { archiveAuthHeaders } from "../lib/archive-auth.js";
 import {
   buildIdUrl,
   AVAILABILITY_ENDPOINT,
@@ -1307,7 +1308,14 @@ export async function handleIngestMessage(env: Env, msg: IngestQueueMessage): Pr
     .bind(now + LEASE_SECONDS, attempts, stage, stageAttempts, msg.ingestId)
     .run();
 
-  const fetcher = new CloudFetcher(env.CRAWLER_USER_AGENT);
+  const fetcher = new CloudFetcher(
+    env.CRAWLER_USER_AGENT,
+    undefined,
+    // Archive.org credentials, when configured. Everything this fetcher talks to is
+    // archive.org, so the headers are unconditional here; the helper still refuses to
+    // emit a partial pair.
+    archiveAuthHeaders(env),
+  );
   // Seed the durable throttle state, so a job throttled in an earlier invocation
   // resumes at the right place in the backoff curve instead of starting over at
   // "one throttle" and retrying immediately.

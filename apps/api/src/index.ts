@@ -22,6 +22,7 @@
  *  - Re-drive stalled jobs whose lease expired without a completion.
  */
 
+import { archiveAuthMode } from "./lib/archive-auth.js";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
@@ -204,6 +205,11 @@ app.get("/v1/health", async (c) => {
     {
       ok: allOk,
       checks,
+      // How archive.org traffic is attributed. `anonymous` is not an error — the crawler
+      // works, it just collects 429s that an account does not (see
+      // `lib/archive-auth.ts`) — so this is reported rather than checked, and it is the
+      // first thing to look at when a crawl is throttled.
+      archiveAuth: archiveAuthMode(c.env),
       backup: {
         configured: backup.configured,
         enabled: backup.enabled,

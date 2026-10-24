@@ -7,6 +7,7 @@
  * GET    /v1/domains/:domainId/coverage — CDX coverage bar (year × day)
  */
 
+import { archiveHeadersFor } from "../lib/archive-auth.js";
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import {
@@ -149,7 +150,7 @@ domainsRouter.get("/:domainId/coverage", async (c) => {
   url.searchParams.set("limit", "2000");
 
   const resp = await fetch(url.toString(), {
-    headers: { "User-Agent": c.env.CRAWLER_USER_AGENT },
+    headers: archiveHeadersFor(url.toString(), c.env, { "User-Agent": c.env.CRAWLER_USER_AGENT }),
   });
   if (!resp.ok) return c.json({ error: "CDX fetch failed" }, 502);
 
