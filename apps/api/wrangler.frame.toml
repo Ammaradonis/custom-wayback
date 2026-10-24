@@ -1,0 +1,63 @@
+# The archive-only frame origin: the same Worker code, deployed a second time under its
+# own hostname, serving archived pages and their resources — and nothing else.
+#
+#   pnpm exec wrangler deploy -c wrangler.frame.toml
+#
+# ## Why a second origin
+#
+# The viewer shows an archived page in an iframe. Served from the app's own origin, that
+# iframe has to be sandboxed *without* `allow-same-origin` (plan.md §10), which gives the
+# page an opaque origin. Modern pages do not survive that: reading `document.cookie`
+# throws, so does touching the about:blank frames they create for themselves, Web Storage
+# is denied, and a browser gives an opaque origin no HTTP cache, so every page view
+# downloads the site's scripts and stylesheets again. The runtime papers over the first
+# three; nothing can fix the fourth.
+#
+# Served from this origin instead, the iframe keeps `allow-same-origin` — safe, because
+# this origin is not the app's: no session, no API and no app shell ever run here (the
+# `ROLE = "frame"` guard in src/index.ts refuses everything that is not an archived page
+# or resource). That is the separate origin §10 prescribes for exactly this case.
+#
+# ## Turning it on
+#
+#   1. Deploy this file once (CI does it when the `FRAME_ORIGIN` repository variable is
+#      set — see .github/workflows/ci.yml).
+#   2. Build the web app with `VITE_FRAME_ORIGIN` set to this Worker's URL (CI passes
+#      the same variable). Until it is set, the viewer keeps using the app origin.
+#
+# Deliberately absent: `[assets]` (the app shell must never be servable here), cron
+# triggers and queue consumers (the app Worker owns those; a second consumer would
+# split the ingest queue between two deployments).
+
+name = "custom-wayback-frame"
+main = "src/index.ts"
+compatibility_date = "2024-12-18"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[[d1_databases]]
+binding       = "DB"
+database_name = "custom-wayback-ledger"
+database_id   = "26bbcdbb-5d59-416e-bea0-9bb4968e20d7"
+
+[[r2_buckets]]
+binding     = "STORAGE"
+bucket_name = "custom-wayback"
+
+[[kv_namespaces]]
+binding = "COVERAGE_KV"
+id      = "3c44c2ecae654b1cab2de4c78ca38245"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+ROLE                = "frame"
+APP_ORIGIN          = "https://custom-wayback-api.ammar-webalchemist.workers.dev"
+CRAWLER_USER_AGENT  = "CustomWaybackBot/1.0 (+https://REPLACE_WITH_YOUR_DOMAIN/bot)"
+SNAPSHOT_BEHAVIOR   = "nearest"
+PURGE_GRACE_SECONDS = "1800"
+MAX_PAGES_PER_MONTH = "1000"
+CRAWL_QUOTA_PER_DAY = "8"
+MONTHLY_BUDGET_USD  = "25"

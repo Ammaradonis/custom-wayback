@@ -262,6 +262,24 @@ const STUB_SCRIPT_HOSTS: RegExp[] = [
   /openx\.net$/i,
   /indexww\.com$/i,
   /casalemedia\.com$/i,
+  // Tag managers and pixels. Tag managers are usually a synchronous script in <head>,
+  // so an archived copy that is slow to fetch holds up the whole page for nothing:
+  // measured on samsung.com, Adobe Launch alone blocked first paint for 34 s.
+  /adobedtm\.com$/i,
+  /tiqcdn\.com$/i,
+  /ensighten\.com$/i,
+  /everesttech\.net$/i,
+  /adsrvr\.org$/i,
+  /snap\.licdn\.com$/i,
+  /ads-twitter\.com$/i,
+  /analytics\.tiktok\.com$/i,
+  /sc-static\.net$/i,
+  /heapanalytics\.com$/i,
+  /hs-analytics\.net$/i,
+  /mxpnl\.com$/i,
+  /fullstory\.com$/i,
+  /siteintercept\.qualtrics\.com$/i,
+  /go-mpulse\.net$/i,
 ];
 
 export function shouldStubScript(urlStr: string): boolean {

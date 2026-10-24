@@ -119,6 +119,11 @@ const STUB_SCRIPT_HOSTS: RegExp[] = [
   /sharethrough\.com$/i, /moatads\.com$/i, /adsafeprotected\.com$/i, /serving-sys\.com$/i,
   /flashtalking\.com$/i, /mathtag\.com$/i, /turn\.com$/i, /rubiconproject\.com$/i, /pubmatic\.com$/i,
   /openx\.net$/i, /indexww\.com$/i, /casalemedia\.com$/i,
+  // Tag managers and pixels; kept in step with the pipeline's list (urlutil.ts).
+  /adobedtm\.com$/i, /tiqcdn\.com$/i, /ensighten\.com$/i, /everesttech\.net$/i, /adsrvr\.org$/i,
+  /snap\.licdn\.com$/i, /ads-twitter\.com$/i, /analytics\.tiktok\.com$/i, /sc-static\.net$/i,
+  /heapanalytics\.com$/i, /hs-analytics\.net$/i, /mxpnl\.com$/i, /fullstory\.com$/i,
+  /siteintercept\.qualtrics\.com$/i, /go-mpulse\.net$/i,
 ];
 
 export function shouldStubScript(urlStr: string): boolean {

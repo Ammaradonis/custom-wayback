@@ -104,8 +104,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # `VITE_FRAME_ORIGIN` points the viewer's iframe at the archive-only frame origin
+      # (apps/api/wrangler.frame.toml). It comes from the `FRAME_ORIGIN` repository
+      # variable, and only for main: a PR preview is not an origin the production frame
+      # Worker lets frame it, so previews keep serving archived pages themselves.
       - name: Build all packages
         run: pnpm turbo run build
+        env:
+          VITE_FRAME_ORIGIN: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && vars.FRAME_ORIGIN || '' }}
 
       - name: Upload web build artifact
         uses: actions/upload-artifact@v4
@@ -183,6 +189,19 @@ jobs:
         working-directory: apps/api
         run: |
           pnpm exec wrangler d1 migrations apply custom-wayback-ledger --remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # The archive-only frame origin, deployed only once the `FRAME_ORIGIN` repository
+      # variable names it — until then the viewer serves archived pages from the app
+      # origin and this Worker does not exist. Before the app Worker, so the shell
+      # never points at a frame origin that is not there yet. No migrations of its own:
+      # it shares the app's D1, which the step above has just migrated.
+      - name: Deploy frame-origin Worker
+        if: ${{ vars.FRAME_ORIGIN != '' }}
+        working-directory: apps/api
+        run: pnpm exec wrangler deploy -c wrangler.frame.toml
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

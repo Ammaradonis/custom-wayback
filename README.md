@@ -102,11 +102,69 @@ tool depends on.
 
 ---
 
+## The viewer: fast, and rendered like a real browser
+
+Reading never waits on a crawl: any page of any day is fetched from archive.org on first view,
+rewritten, and from then on served from Cloudflare's edge.
+
+| What happens | Where | Why it is fast |
+|---|---|---|
+| A rendered page is cached at the edge for 7 days, keyed by route, origin and runtime version | `serveSnapshotPage` in `apps/api/src/routes/viewer.ts` | A repeat view is an edge hit: no D1 query, no archive.org request (plan.md §12 rule 1: one `id_` fetch per URL per day, ever) |
+| Archived resources are cached at the edge, including "not archived" answers (1 day) | `fetchOnDemandResource` | A missing asset is not re-requested from archive.org on every view |
+| The page's top in-site links — and any link the reader hovers — are prepared at the edge before they are clicked, with the stylesheets and blocking scripts they need to paint | `POST /_cw/warm` → `scheduleWarm` | The next click is an edge hit. Paced: one page at a time, at most 2 pages and 6 uncached assets per request, sent in staggered batches, inside the Free plan's subrequest and CPU limits. Any 429 from archive.org pauses it in that data centre for 2 minutes |
+| The capture is found with `id_` replay, following archive.org's redirects by hand | `locateCapture` | One round trip cheaper than availability-then-fetch, and correct for sites whose homepage is a redirect (samsung.com → `/us/`) |
+| Analytics, tag managers and beacons are never proxied | `isTrackerUrl`, runtime `isTracker` | They are refused in the browser by the page's policy, at no cost to anyone |
+
+What makes a modern page *render*:
+
+- **Resource URLs keep the original directory structure** — `/_cw/r/<ts>/<scheme>/<host><path>` —
+  so code-split bundles (webpack `publicPath: 'auto'`, native `import './chunk.js'`) and a
+  stylesheet's own relative `url()`s resolve to the right archived file.
+- **The runtime rewrites what page scripts build after load**: `img.src`/`srcset` property writes,
+  `innerHTML`, `insertAdjacentHTML`, `document.write`, inline style and CSSOM writes, and links
+  rendered with root-relative hrefs — with a `MutationObserver` as the net under the hooks. A
+  root-relative URL that still escapes is recovered by the Worker from its `Referer`.
+- **A top-level visit to a viewer URL gets the app shell** (reload, shared link, new tab), never the
+  archived page outside the viewer.
+- **The page's encoding is preserved**, so a page that declared it only in markup is not decoded
+  as windows-1252.
+
+### The frame origin (recommended)
+
+Served from the app's own origin, an archived page must run in an opaque-origin sandbox
+(plan.md §10). Modern pages break there: `document.cookie` throws, so does the about:blank frame a
+page builds for itself, and browsers give an opaque origin **no HTTP cache**, so every page view
+downloads the site's scripts and stylesheets again. The runtime papers over the first two; nothing
+fixes the third.
+
+`apps/api/wrangler.frame.toml` deploys the same Worker a second time as an **archive-only origin**.
+There, archived pages keep a real origin (`allow-same-origin` is safe because nothing of the app runs
+on it: the `ROLE = "frame"` guard refuses the shell, the API and share links), only the app may frame
+it (`frame-ancestors`), and a site's assets are cached by the browser across pages.
+
+To turn it on, set one repository variable — CI does the rest on the next push to `main`:
+
+```powershell
+gh variable set FRAME_ORIGIN --body "https://custom-wayback-frame.ammar-webalchemist.workers.dev"
+```
+
+That deploys the frame Worker (before the app, so the shell never points at nothing) and builds the
+web app with `VITE_FRAME_ORIGIN`. Unset the variable to go back. Locally:
+
+```powershell
+cd apps\api
+npx --no-install pnpm exec wrangler dev --port 8788 --local
+npx --no-install pnpm exec wrangler dev -c wrangler.frame.toml --port 8789 --local --var APP_ORIGIN:http://127.0.0.1:8788
+# and build the web app with $env:VITE_FRAME_ORIGIN = "http://127.0.0.1:8789"
+```
+
+---
+
 ## Continuous deployment
 
 **Every push to `main` deploys via GitHub Actions** — see the `deploy` job in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The order is
-`gitleaks → typecheck → build → tests → deploy`, so a commit that fails the 132-test suite never
+`gitleaks → typecheck → build → tests → deploy`, so a commit that fails the 199-test suite never
 reaches production.
 
 The deploy job needs two repository secrets, `CLOUDFLARE_API_TOKEN` and
@@ -161,7 +219,7 @@ Full runbook, including the induced-429 acceptance test and the rollback table:
 
 ```powershell
 npx --no-install pnpm turbo run typecheck   # 7 tasks, all packages
-npx --no-install pnpm turbo run test        # 132 tests: 33 crawler, 99 api
+npx --no-install pnpm turbo run test        # 199 tests: 38 crawler, 161 api
 ```
 
 `apps/api`'s tests run the **shipping module graph**: `scripts/run-api-tests.mjs` bundles each test
@@ -307,7 +365,9 @@ same line items the invoice does, computed from usage recorded as the work happe
   Worker; [`apps/api/src/lib/password.ts`](apps/api/src/lib/password.ts) explains the trade-off and
   the migration path.
 - JWTs signed with **HS256**, 7-day TTL, revocable via the sessions table
-- Archived pages served in a `sandbox="allow-scripts allow-forms allow-popups"` iframe
+- Archived pages served in a sandboxed iframe: an opaque origin on the app's own origin, or a
+  real origin on the archive-only frame origin, which no session, API or app shell ever reaches
+  (see [the frame origin](#the-frame-origin-recommended))
 - Strict `Content-Security-Policy` on every served snapshot
 - `gitleaks` scans every commit; see `.gitleaks.toml`
 

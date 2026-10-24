@@ -105,7 +105,9 @@ export function snapshotCspForOrigin(origin: string): string {
       return SNAPSHOT_CSP;
     }
     const resources = SNAPSHOT_CSP.replace(/'self'/g, `'self' ${url.origin}`);
-    return `${resources}; connect-src ${url.origin}/_cw/resource`;
+    // A source ending in `/` matches the path prefix: the resource route in both of its
+    // forms (`/_cw/r/…` and the older `/_cw/resource`), and nothing else on the origin.
+    return `${resources}; connect-src ${url.origin}/_cw/`;
   } catch {
     return SNAPSHOT_CSP;
   }

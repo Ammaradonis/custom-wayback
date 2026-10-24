@@ -51,6 +51,18 @@ export interface Env {
   /** Optional: only allow registrations from these comma-separated emails. */
   ALLOWED_EMAILS?: string;
 
+  // ── Frame origin (optional; see wrangler.frame.toml) ─────────────────────
+  //
+  // The same code deployed a second time, under its own hostname, serves archived pages
+  // and nothing else. Its responses differ in exactly three ways: the archived document
+  // keeps a real origin (`allow-same-origin` — safe, because that origin is not the
+  // app's), only the app origin may frame it, and anything that is not an archived page
+  // or resource is refused, so the app shell and the API never run there.
+  /** `"frame"` on the archive-only deployment; unset on the app. */
+  ROLE?: string;
+  /** The app's origin. Required when `ROLE` is `"frame"`. */
+  APP_ORIGIN?: string;
+
   // ── Backup tuning (all optional; see packages/shared/src/backup.ts) ──────
   /** Mirrored schema. Defaults to `cw_backup`. */
   SUPABASE_SCHEMA?: string;

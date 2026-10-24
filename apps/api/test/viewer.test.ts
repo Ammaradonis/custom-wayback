@@ -59,12 +59,20 @@ import {
   isStrippedMeta,
   scriptDisposition,
   snapshotCsp,
+  snapshotCspForOrigin,
   stubScriptHtml,
 } from "@custom-wayback/pipeline";
 import { WAYBACK_RAW_BASE } from "@custom-wayback/shared";
 
 import { rewriteHtml } from "../src/queue/rewrite.ts";
-import { fetchOnDemand, viewerRouter } from "../src/routes/viewer.ts";
+import {
+  fetchOnDemand,
+  leakedArchiveResource,
+  parseResourcePath,
+  resourcePath,
+  scheduleWarm,
+  viewerRouter,
+} from "../src/routes/viewer.ts";
 import type { Env } from "../src/env.ts";
 
 // ── The stand-in ─────────────────────────────────────────────────────────────
@@ -446,6 +454,8 @@ interface Harness {
   db: FakeSnapshotDb;
   /** Every URL the Worker fetched, in order. */
   fetches: string[];
+  /** What the route stored in the edge cache, by key. */
+  edge: Map<string, Response>;
   restore(): void;
 }
 
@@ -453,14 +463,25 @@ interface HarnessOptions {
   archived?: string;
   archivedStatus?: number;
   snapshot?: SnapshotRow | null;
+  /**
+   * Answer a request before the defaults do: an archive redirect, an asset, a
+   * different content type. `undefined` falls through to the default behaviour.
+   */
+  respond?: (url: string) => Response | undefined;
+  /** Edge cache contents, by key; `put` writes land here too. */
+  edge?: Map<string, Response>;
+  /** The static-assets binding, for the app-shell path. */
+  assets?: Fetcher;
 }
 
 function harness(options: HarnessOptions = {}): Harness {
   const db = new FakeSnapshotDb(options.snapshot ?? null);
   const fetches: string[] = [];
 
+  const edge = options.edge ?? new Map<string, Response>();
   const env = {
     DB: db.binding(),
+    ...(options.assets ? { ASSETS: options.assets } : {}),
     // `serveCachedPage` calls R2 only when the cache misses; an empty bucket is what
     // makes the route fall through to the on-demand path.
     STORAGE: {
@@ -479,6 +500,8 @@ function harness(options: HarnessOptions = {}): Harness {
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     fetches.push(url);
+    const scripted = options.respond?.(url);
+    if (scripted) return scripted;
     if (url.includes("id_")) {
       return new Response(options.archived ?? ARCHIVED_HTML, {
         status: options.archivedStatus ?? 200,
@@ -492,11 +515,14 @@ function harness(options: HarnessOptions = {}): Harness {
 
   (globalThis as { caches?: unknown }).caches = {
     default: {
-      async match() {
-        return undefined;
+      async match(key: string) {
+        const hit = edge.get(key);
+        return hit ? hit.clone() : undefined;
       },
-      async put() {
-        /* the cache is irrelevant here; nothing should be stored by this path */
+      async put(key: string, response: Response) {
+        // Read the body now, as the real cache does, so a test sees what was stored.
+        const body = await response.arrayBuffer();
+        edge.set(key, new Response(body, { status: response.status, headers: response.headers }));
       },
     },
   };
@@ -505,6 +531,7 @@ function harness(options: HarnessOptions = {}): Harness {
     env,
     db,
     fetches,
+    edge,
     restore: () => {
       globalThis.fetch = originalFetch;
       (globalThis as { caches?: unknown }).caches = originalCaches;
@@ -518,11 +545,21 @@ async function runOnDemand(path = "/"): Promise<{ response: Response; html: stri
   return { response, html: await response.text(), h };
 }
 
-/** The execution context Hono hands the route; the route only reads it on the R2 path. */
+/**
+ * The execution context Hono hands the route. `waitUntil` work is collected so a test can
+ * wait for the background writes (edge cache, warming) it is asserting on.
+ */
+const pending: Promise<unknown>[] = [];
 const executionCtx = {
-  waitUntil() {},
+  waitUntil(promise: Promise<unknown>) {
+    pending.push(promise);
+  },
   passThroughOnException() {},
 } as unknown as ExecutionContext;
+
+async function settle(): Promise<void> {
+  while (pending.length) await Promise.allSettled(pending.splice(0));
+}
 
 // ── The contract, as values ──────────────────────────────────────────────────
 
@@ -676,7 +713,11 @@ test("the on-demand output carries the runtime, the CSP and the snapshot base", 
     assert.deepEqual(JSON.parse(mirror?.getAttribute("content") ?? "{}"), {
       day: DAY,
       url: PAGE_URL,
+      ts: TS,
       source: "on-demand",
+      resolvedDay: DAY,
+      deltaDays: null,
+      resourceProxy: true,
     });
   } finally {
     h.restore();
@@ -708,7 +749,11 @@ test("the on-demand output stubs a dead analytics script and keeps a live app sc
     assert.equal(stubbed?.getAttribute("type"), "text/plain");
 
     const liveSources = Array.from(document.querySelectorAll("script[src]")).map((el) => el.getAttribute("src"));
-    assert.deepEqual(liveSources, ["/app.js"], `only the app script may stay live, got ${JSON.stringify(liveSources)}`);
+    assert.deepEqual(
+      liveSources,
+      [`/_cw/r/${TS}/https/example.com/app.js`],
+      `only the app script may stay live, through the resource route; got ${JSON.stringify(liveSources)}`,
+    );
     assert.ok(!html.includes(`src="${GA_URL}"`), "the dead URL must not survive as a live src");
     assert.ok(!document.querySelector("#ga-script"), "the original script element should be replaced outright");
 
@@ -864,28 +909,34 @@ test("the route falls through to the on-demand path when R2 has nothing", async 
 
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("X-Custom-Wayback-Source"), "on-demand");
+    // The route allows its own origin for mirrored resources: an opaque-origin frame
+    // cannot match them with 'self' alone.
     assert.equal(
       document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content"),
-      snapshotCsp(),
+      snapshotCspForOrigin("http://localhost"),
       "the same policy, whichever way the page arrived",
     );
+    const header = response.headers.get("Content-Security-Policy") ?? "";
+    assert.ok(header.startsWith(snapshotCspForOrigin("http://localhost")), header);
+    assert.match(header, /; sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox$/);
   } finally {
     h.restore();
   }
 });
 
-test("asset references keep their original URLs and no asset is fetched at read time", async () => {
-  // This is the deliberate scope limit documented in `fetchOnDemand`: remapping assets
-  // needs the content-addressed map, which needs the bytes hashed at ingest. Fetching
-  // them here would put archive.org back on the critical path §3.1 removed, so the
-  // references stay absolute and the §10 CSP — unchanged on this path — is what
-  // contains them. Asserted rather than assumed, because "just fetch the assets" is
-  // the obvious-looking change somebody will otherwise make.
+test("asset references go through the same-origin resource route, and none is fetched at read time", async () => {
+  // Rewriting a reference is a string transformation; fetching it is the browser's
+  // business, later, through `/_cw/r/`. The page path itself must never fetch assets —
+  // that would put archive.org back on the critical path (§3.1) — and the policy must
+  // never allow-list the original hosts, which is what keeps a dead beacon dead (§10).
   const { html, h } = await runOnDemand();
   try {
     const { document } = parseHTML(html);
-    assert.equal(document.querySelector('link[rel="stylesheet"]')?.getAttribute("href"), "/style.css");
-    assert.equal(document.querySelector("img")?.getAttribute("src"), "https://cdn.example.com/logo.png");
+    assert.equal(
+      document.querySelector('link[rel="stylesheet"]')?.getAttribute("href"),
+      `/_cw/r/${TS}/https/example.com/style.css`,
+    );
+    assert.equal(document.querySelector("img")?.getAttribute("src"), `/_cw/r/${TS}/https/cdn.example.com/logo.png`);
     assert.equal(h.fetches.length, 1, `only the page fetch is allowed, saw ${h.fetches.join(", ")}`);
     assert.ok(!snapshotCsp().includes("cdn.example.com"), "the policy must not allow-list the original origin");
   } finally {
@@ -956,12 +1007,12 @@ test("contract equivalence: ingest and on-demand cannot drift on ids, robots int
       assert.equal(stub?.getAttribute("class"), HEAD_CONTRACT.stubScript.className);
       assert.equal(stub?.getAttribute("data-cw-stub"), GA_URL);
     }
-    // `/app.js` is *kept* by triage on both paths; the renditions differ afterwards for
-    // the reason documented in viewer.ts — with no asset bytes at ingest it becomes a
-    // `data-cw-missing` marker, and with no asset map at read time it keeps its URL.
+    // `/app.js` is *kept* by triage on both paths; the renditions differ afterwards —
+    // with no asset bytes at ingest it becomes a `data-cw-missing` marker, and at read
+    // time it is served through the resource route.
     assert.equal(scriptDisposition("/app.js"), "keep");
     assert.equal(ingestDoc.querySelector('script[data-cw-missing="/app.js"]')?.getAttribute("type"), "text/plain");
-    assert.equal(onDemand.querySelector('script[src="/app.js"]')?.getAttribute("src"), "/app.js");
+    assert.ok(onDemand.querySelector(`script[src="/_cw/r/${TS}/https/example.com/app.js"]`));
 
     // 5. Form neutralisation: the attribute sets must be identical, attribute for
     //    attribute, from the same contract data.
@@ -983,4 +1034,436 @@ test("contract equivalence: ingest and on-demand cannot drift on ids, robots int
   } finally {
     h.restore();
   }
+});
+
+// ── Finding the capture: the archive's redirects, followed by hand ───────────
+
+/** An archive redirect, the way `id_` replay sends one. */
+function archiveRedirect(status: number, location: string): Response {
+  return new Response(null, { status, headers: { Location: location } });
+}
+
+test("a redirect the site itself made when captured moves the viewer to that route", async () => {
+  // samsung.com's homepage is captured as a 301 to /us/. Serving /us/ under the `/`
+  // route would resolve every relative link against the wrong directory.
+  const h = harness({
+    respond: (url) =>
+      url === `${WAYBACK_RAW_BASE}/${TS}id_/${PAGE_URL}`
+        ? archiveRedirect(301, `/web/${TS}id_/https://www.example.com/us/`)
+        : undefined,
+  });
+  try {
+    const response = await fetchOnDemand(DOMAIN, DAY, "/", TS, h.env);
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("Location"), `/a/${DOMAIN}/${DAY}/us/`);
+    assert.equal(h.fetches.length, 1, "the redirect is answered without fetching its target");
+  } finally {
+    h.restore();
+  }
+});
+
+test("the archive's own nearest-capture redirect is followed, and the page says which capture it is", async () => {
+  const nearest = "20240314235959";
+  const h = harness({
+    respond: (url) =>
+      url === `${WAYBACK_RAW_BASE}/${TS}id_/${PAGE_URL}`
+        ? archiveRedirect(302, `https://web.archive.org/web/${nearest}id_/https://www.example.com/`)
+        : undefined,
+  });
+  try {
+    const response = await fetchOnDemand(DOMAIN, DAY, "/", TS, h.env);
+    const html = await response.text();
+    assert.equal(response.status, 200);
+    assert.deepEqual(h.fetches, [
+      `${WAYBACK_RAW_BASE}/${TS}id_/${PAGE_URL}`,
+      `${WAYBACK_RAW_BASE}/${nearest}id_/https://www.example.com/`,
+    ]);
+    const mirror = JSON.parse(
+      parseHTML(html).document.querySelector('meta[name="cw-mirror"]')?.getAttribute("content") ?? "{}",
+    );
+    assert.equal(mirror.ts, nearest);
+    assert.equal(mirror.url, "https://www.example.com/");
+    assert.equal(mirror.resolvedDay, "2024-03-14", "the toolbar can say the capture is from the day before");
+  } finally {
+    h.restore();
+  }
+});
+
+test("an archive redirect that leaves web.archive.org is never followed", async () => {
+  const h = harness({
+    respond: (url) => (url.includes("id_") ? archiveRedirect(302, "https://live.example.com/") : undefined),
+  });
+  try {
+    const response = await fetchOnDemand(DOMAIN, DAY, "/", TS, h.env);
+    assert.equal(response.status, 502);
+    assert.ok(!h.fetches.some((url) => url.startsWith("https://live.example.com")));
+  } finally {
+    h.restore();
+  }
+});
+
+// ── The route: edge cache, app shell, subresources ───────────────────────────
+
+test("a rendered page is stored at the edge, and the next visit is served from it with no D1 or archive work", async () => {
+  const edge = new Map<string, Response>();
+  const first = harness({ edge });
+  try {
+    const response = await viewerRouter.request(`/${DOMAIN}/${DAY}/`, {}, first.env, executionCtx);
+    await response.text();
+    await settle();
+    assert.equal(response.headers.get("X-Custom-Wayback-Cache"), "miss");
+    assert.equal(response.headers.get("Cache-Control"), "no-store", "the browser never keeps it");
+    assert.equal(response.headers.get("X-CW-Edge-Store"), null, "the internal marker never leaves the Worker");
+    assert.equal(edge.size, 1);
+    const [stored] = [...edge.values()];
+    assert.match(stored?.headers.get("Cache-Control") ?? "", /public, max-age=\d+/);
+  } finally {
+    first.restore();
+  }
+
+  const second = harness({ edge });
+  try {
+    const response = await viewerRouter.request(`/${DOMAIN}/${DAY}/`, {}, second.env, executionCtx);
+    const html = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("X-Custom-Wayback-Cache"), "hit");
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.ok(html.includes(`id="${RUNTIME_SCRIPT_ID}"`));
+    assert.deepEqual(second.fetches, [], "an edge hit asks archive.org nothing");
+    assert.deepEqual(second.db.unrecognised, []);
+  } finally {
+    second.restore();
+  }
+});
+
+test("a failure is not stored at the edge", async () => {
+  const edge = new Map<string, Response>();
+  const h = harness({ edge, archivedStatus: 503 });
+  try {
+    const response = await viewerRouter.request(`/${DOMAIN}/${DAY}/`, {}, h.env, executionCtx);
+    await response.text();
+    await settle();
+    assert.equal(response.status, 502);
+    assert.equal(edge.size, 0);
+  } finally {
+    h.restore();
+  }
+});
+
+test("a top-level navigation to a viewer URL gets the app shell, not the archived page", async () => {
+  const shellHtml = "<!doctype html><div id=root></div>";
+  const assets = {
+    async fetch(request: Request) {
+      assert.equal(new URL(request.url).pathname, "/");
+      return new Response(shellHtml, { headers: { "Content-Type": "text/html" } });
+    },
+  } as unknown as Fetcher;
+  const h = harness({ assets });
+  try {
+    const response = await viewerRouter.request(
+      `/${DOMAIN}/${DAY}/about`,
+      { headers: { "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate" } },
+      h.env,
+      executionCtx,
+    );
+    assert.equal(await response.text(), shellHtml);
+    assert.deepEqual(h.fetches, [], "the shell never touches archive.org");
+    response.headers.set("X-Test", "1"); // the response is ours to decorate
+  } finally {
+    h.restore();
+  }
+});
+
+test("a subresource request on a viewer route is answered with the archived asset, not a rewritten page", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  const h = harness({
+    respond: (url) =>
+      url.endsWith("id_/https://example.com/img/hero.png")
+        ? new Response(png, { headers: { "Content-Type": "image/png" } })
+        : undefined,
+  });
+  try {
+    const response = await viewerRouter.request(
+      `/${DOMAIN}/${DAY}/img/hero.png`,
+      { headers: { "Sec-Fetch-Dest": "image" } },
+      h.env,
+      executionCtx,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Content-Type"), "image/png");
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), png);
+    assert.deepEqual(h.fetches, [
+      `${WAYBACK_RAW_BASE}/${DAY.replace(/-/g, "")}120000id_/https://example.com/img/hero.png`,
+    ]);
+  } finally {
+    h.restore();
+  }
+});
+
+test("a capture that is not a document is served as itself", async () => {
+  const h = harness({
+    respond: (url) =>
+      url.includes("id_") ? new Response("%PDF-1.4", { headers: { "Content-Type": "application/pdf" } }) : undefined,
+  });
+  try {
+    const response = await fetchOnDemand(DOMAIN, DAY, "/brochure.pdf", TS, h.env);
+    assert.equal(response.headers.get("Content-Type"), "application/pdf");
+    assert.equal(await response.text(), "%PDF-1.4");
+  } finally {
+    h.restore();
+  }
+});
+
+test("a page that declares its encoding only in markup is labelled with it", async () => {
+  // The injected head pushes the page's own <meta charset> past the 1024 bytes a
+  // browser scans, so the header has to say it.
+  const latin1 = `<!DOCTYPE html><html><head><meta charset="iso-8859-1"><title>cafe</title></head><body></body></html>`;
+  const h = harness({
+    respond: (url) =>
+      url.includes("id_") ? new Response(latin1, { headers: { "Content-Type": "text/html" } }) : undefined,
+  });
+  try {
+    const response = await fetchOnDemand(DOMAIN, DAY, "/", TS, h.env);
+    assert.equal(response.headers.get("Content-Type"), "text/html; charset=iso-8859-1");
+  } finally {
+    h.restore();
+  }
+});
+
+test("a page's base is its own directory, so its script resolves relative URLs as the original did", async () => {
+  const h = harness();
+  try {
+    const response = await fetchOnDemand(DOMAIN, DAY, "/iphone/index.html", TS, h.env);
+    const { document } = parseHTML(await response.text());
+    assert.equal(document.querySelector("base")?.getAttribute("href"), `/a/${DOMAIN}/${DAY}/iphone/`);
+  } finally {
+    h.restore();
+  }
+});
+
+// ── The resource URL scheme and the leak net ─────────────────────────────────
+
+test("resource paths keep the original directory structure and round-trip", () => {
+  const original = new URL("https://www.apple.com:8443/v/home/main.built.js?v=3");
+  const path = resourcePath(TS, original);
+  assert.equal(path, `/_cw/r/${TS}/https/www.apple.com:8443/v/home/main.built.js?v=3`);
+  assert.ok(!path.includes("//"), "no double slash for anything in between to collapse");
+
+  // What makes webpack's publicPath 'auto' and `import './chunk.js'` work: resolving
+  // relative to the proxied file lands on the proxied sibling.
+  const sibling = new URL("./chunk.js", `https://app.test${path}`);
+  assert.deepEqual(parseResourcePath(sibling.pathname, sibling.search), {
+    ts: TS,
+    url: "https://www.apple.com:8443/v/home/chunk.js",
+  });
+
+  const parsed = parseResourcePath(`/_cw/r/${TS}/https/www.apple.com:8443/v/home/main.built.js`, "?v=3");
+  assert.deepEqual(parsed, { ts: TS, url: original.href });
+  assert.equal(parseResourcePath(`/_cw/r/2024/https/a.test/x`, ""), null, "a timestamp is 14 digits");
+  assert.equal(parseResourcePath(`/_cw/r/${TS}/ftp/a.test/x`, ""), null, "http(s) only");
+});
+
+test("a root-relative URL an archived page built in script is recovered from its Referer", () => {
+  const leak = (path: string, headers: Record<string, string>) =>
+    leakedArchiveResource(new Request(`https://app.test${path}`, { headers }));
+
+  assert.deepEqual(
+    leak("/images/hero.jpg", {
+      "Sec-Fetch-Dest": "image",
+      "Sec-Fetch-Site": "cross-site",
+      Referer: `https://app.test/a/${DOMAIN}/${DAY}/iphone/`,
+    }),
+    { ts: `${DAY.replace(/-/g, "")}120000`, url: "https://example.com/images/hero.jpg", destination: "image" },
+  );
+
+  // A stylesheet's own relative reference, issued from the proxied stylesheet.
+  assert.deepEqual(
+    leak("/fonts/a.woff2", {
+      "Sec-Fetch-Dest": "font",
+      "Sec-Fetch-Site": "cross-site",
+      Referer: `https://app.test/_cw/r/${TS}/https/www.apple.com/v/styles/main.css`,
+    }),
+    { ts: TS, url: "https://www.apple.com/fonts/a.woff2", destination: "font" },
+  );
+
+  // The app shell's own requests are same-origin and are never touched.
+  assert.equal(
+    leak("/favicon.ico", {
+      "Sec-Fetch-Dest": "image",
+      "Sec-Fetch-Site": "same-origin",
+      Referer: `https://app.test/a/${DOMAIN}/${DAY}/`,
+    }),
+    null,
+  );
+  // Navigations and fetches are not assets.
+  assert.equal(
+    leak("/about", {
+      "Sec-Fetch-Dest": "iframe",
+      "Sec-Fetch-Site": "cross-site",
+      Referer: `https://app.test/a/${DOMAIN}/${DAY}/`,
+    }),
+    null,
+  );
+  // A Referer from another origin proves nothing.
+  assert.equal(
+    leak("/x.png", {
+      "Sec-Fetch-Dest": "image",
+      "Sec-Fetch-Site": "cross-site",
+      Referer: `https://elsewhere.test/a/${DOMAIN}/${DAY}/`,
+    }),
+    null,
+  );
+});
+
+// ── Warming ──────────────────────────────────────────────────────────────────
+
+test("warming prepares likely next pages and what they need to paint, at most two, never twice", async () => {
+  const edge = new Map<string, Response>();
+  const h = harness({ edge });
+  try {
+    const routes = [
+      `/a/${DOMAIN}/${DAY}/one`,
+      `/a/${DOMAIN}/${DAY}/one#section`, // same page
+      "/not-a-route",
+      `/a/${DOMAIN}/not-a-day/x`,
+      ...Array.from({ length: 8 }, (_, i) => `/a/${DOMAIN}/${DAY}/p${i}`),
+    ];
+    const accepted = scheduleWarm(h.env, executionCtx, "https://app.test", routes);
+    assert.equal(accepted, 2, "one warm request prepares a small batch");
+    await settle();
+
+    const pages = [...edge.keys()].filter((key) => key.includes("/page/"));
+    assert.equal(pages.length, 2);
+    // The fixture's stylesheet and its blocking app script are warmed with the first
+    // page; the second page shares them, so they cost nothing more. The analytics script
+    // is stubbed, never fetched.
+    const archived = h.fetches.filter((url) => url.includes("id_"));
+    assert.equal(archived.filter((url) => url.endsWith("/style.css")).length, 1);
+    assert.equal(archived.filter((url) => url.endsWith("/app.js")).length, 1);
+    assert.equal(archived.length, 2 + 2, "two pages and two shared assets");
+    assert.ok(!h.fetches.some((url) => url.includes("google-analytics")));
+
+    // Already at the edge: a second warm costs no archive request at all.
+    const before = h.fetches.length;
+    scheduleWarm(h.env, executionCtx, "https://app.test", routes);
+    await settle();
+    assert.equal(h.fetches.length, before);
+  } finally {
+    h.restore();
+  }
+});
+
+test("warming stands down while archive.org is throttling, including after a visit was throttled", async () => {
+  const throttle = (url: string) => (url.includes("id_") ? new Response("Too Many Requests", { status: 429 }) : undefined);
+  const edge = new Map<string, Response>();
+  const h = harness({ edge, respond: throttle });
+  try {
+    scheduleWarm(h.env, executionCtx, "https://app.test", [`/a/${DOMAIN}/${DAY}/one`, `/a/${DOMAIN}/${DAY}/two`]);
+    await settle();
+    // The first 429 ends the batch: the second page is never asked for.
+    assert.equal(h.fetches.filter((url) => url.includes("id_")).length, 1);
+    assert.ok(![...edge.keys()].some((key) => key.includes("/page/")), "a throttled page is not stored");
+
+    // The data centre remembers, so the next batch asks for nothing.
+    const before = h.fetches.length;
+    scheduleWarm(h.env, executionCtx, "https://app.test", [`/a/${DOMAIN}/${DAY}/three`]);
+    await settle();
+    assert.equal(h.fetches.length, before);
+  } finally {
+    h.restore();
+  }
+
+  // A visit is still attempted while throttled — the reader asked for it — and its 429
+  // is what tells the prefetcher to wait.
+  const visitEdge = new Map<string, Response>();
+  const visit = harness({ edge: visitEdge, respond: throttle });
+  try {
+    const response = await viewerRouter.request(`/${DOMAIN}/${DAY}/`, {}, visit.env, executionCtx);
+    assert.match(await response.text(), /rate-limiting/);
+    await settle();
+    assert.equal(response.status, 502);
+    assert.equal(response.headers.get("X-Custom-Wayback-Archive"), "throttled");
+
+    const before = visit.fetches.length;
+    scheduleWarm(visit.env, executionCtx, "https://app.test", [`/a/${DOMAIN}/${DAY}/four`]);
+    await settle();
+    assert.equal(visit.fetches.length, before);
+  } finally {
+    visit.restore();
+  }
+});
+
+test("warming ignores anything that is not a list of routes", () => {
+  const h = harness();
+  try {
+    assert.equal(scheduleWarm(h.env, executionCtx, "https://app.test", "nope"), 0);
+    assert.equal(scheduleWarm(h.env, executionCtx, "https://app.test", [42, null, "/v1/jobs"]), 0);
+  } finally {
+    h.restore();
+  }
+});
+
+// ── The archive-only frame origin ────────────────────────────────────────────
+
+const APP = "https://app.test";
+
+function frameHarness(options: HarnessOptions = {}): Harness {
+  const h = harness(options);
+  Object.assign(h.env, { ROLE: "frame", APP_ORIGIN: APP });
+  return h;
+}
+
+test("on the frame origin an archived page keeps a real origin; on the app origin it never does", async () => {
+  const onApp = harness();
+  try {
+    const response = await viewerRouter.request(`/${DOMAIN}/${DAY}/`, {}, onApp.env, executionCtx);
+    await response.text();
+    const policy = response.headers.get("Content-Security-Policy") ?? "";
+    assert.match(policy, /; sandbox [^;]*$/);
+    assert.ok(!policy.includes("allow-same-origin"), "on the app's own origin the page must stay opaque (§10)");
+  } finally {
+    onApp.restore();
+  }
+
+  const onFrame = frameHarness();
+  try {
+    const response = await viewerRouter.request(`/${DOMAIN}/${DAY}/`, {}, onFrame.env, executionCtx);
+    await response.text();
+    assert.match(response.headers.get("Content-Security-Policy") ?? "", /; sandbox [^;]*allow-same-origin/);
+  } finally {
+    onFrame.restore();
+  }
+});
+
+test("a frame-origin URL opened on its own goes to the viewer on the app origin", async () => {
+  const h = frameHarness();
+  try {
+    const response = await viewerRouter.request(
+      `/${DOMAIN}/${DAY}/about`,
+      { headers: { "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate" } },
+      h.env,
+      executionCtx,
+    );
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("Location"), `${APP}/${DOMAIN}/${DAY}/about`);
+    assert.deepEqual(h.fetches, []);
+  } finally {
+    h.restore();
+  }
+});
+
+test("on the frame origin a same-origin leak is an archived page's, and is recovered", () => {
+  const request = new Request("https://frame.test/images/hero.jpg", {
+    headers: {
+      "Sec-Fetch-Dest": "image",
+      "Sec-Fetch-Site": "same-origin",
+      Referer: `https://frame.test/a/${DOMAIN}/${DAY}/`,
+    },
+  });
+  assert.equal(leakedArchiveResource(request), null, "on the app origin same-origin means the shell");
+  assert.deepEqual(leakedArchiveResource(request, { sameOriginIsArchive: true }), {
+    ts: `${DAY.replace(/-/g, "")}120000`,
+    url: "https://example.com/images/hero.jpg",
+    destination: "image",
+  });
 });

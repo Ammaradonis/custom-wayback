@@ -6,7 +6,9 @@
  *  GET  /v1/domains/…   — domain management
  *  POST /v1/jobs        — start a crawl;  GET /v1/jobs/:id for status
  *  GET  /v1/jobs/usage  — cost monitoring dashboard payload
- *  GET  /a/:domain/…    — archive viewer (fast plane)
+ *  GET  /a/:domain/…    — archive viewer (fast plane); a top-level navigation gets the shell
+ *  GET  /_cw/r/…        — archived resources for on-demand pages
+ *  POST /_cw/warm       — prepare likely next pages at the edge
  *  anything else        — static assets (Workers Static Assets from apps/web/dist)
  *
  * Queue handler:
@@ -27,7 +29,14 @@ import { logger } from "hono/logger";
 import { authRouter } from "./routes/auth.js";
 import { domainsRouter } from "./routes/domains.js";
 import { ingestRouter } from "./routes/ingest.js";
-import { fetchOnDemandResource, viewerRouter } from "./routes/viewer.js";
+import {
+  fetchOnDemandResource,
+  frameAppOrigin,
+  leakedArchiveResource,
+  parseResourcePath,
+  scheduleWarm,
+  viewerRouter,
+} from "./routes/viewer.js";
 import { manifestRouter } from "./routes/manifest.js";
 import { searchRouter } from "./routes/search.js";
 import { sharesRouter } from "./routes/shares.js";
@@ -59,17 +68,52 @@ function setArchiveResourceHeaders(headers: Headers, origin: string | undefined)
 
 // ── Global middleware ─────────────────────────────────────────────────────────
 
-// The archived page lives in an opaque-origin iframe. CORP's normal same-origin
-// default would block its font and other no-cors asset requests, so opt only the
-// two public archive-asset routes into cross-origin resource loading. This middleware
-// wraps secureHeaders so its route-specific value is the final response header.
-app.use("/assets/*", async (c, next) => {
+// The archive-only frame origin (wrangler.frame.toml) serves archived pages and their
+// resources, and nothing else: no app shell, no API, no share links. Archived documents
+// there keep a real origin, so nothing that holds a session may ever run on it. It is
+// framed by the app origin alone — the header form, because `frame-ancestors` is
+// ignored in a meta policy — instead of `X-Frame-Options: SAMEORIGIN`, which would
+// refuse the app. Registered first, so it is outermost and has the last word.
+app.use("*", async (c, next) => {
+  const appOrigin = frameAppOrigin(c.env);
+  if (!appOrigin) return next();
+
+  const path = c.req.path;
+  if (!path.startsWith("/a/") && !path.startsWith("/_cw/") && !/^\/assets\/[0-9a-f]{2}\/[0-9a-f]{64}$/i.test(path)) {
+    // A root-relative URL an archived page built in script lands here; on this origin
+    // every same-origin request comes from an archived page.
+    const leaked = leakedArchiveResource(c.req.raw, { sameOriginIsArchive: true });
+    if (!leaked) return c.text("Not found", 404);
+    const response = await fetchOnDemandResource(leaked.ts, leaked.url, c.env, c.executionCtx, leaked.destination);
+    setArchiveResourceHeaders(response.headers, c.req.header("Origin"));
+    return response;
+  }
+
   await next();
-  setArchiveResourceHeaders(c.res.headers, c.req.header("Origin"));
+  c.res.headers.delete("X-Frame-Options");
+  c.res.headers.append("Content-Security-Policy", `frame-ancestors ${appOrigin}`);
 });
-app.use("/_cw/resource", async (c, next) => {
+
+// The archived page lives in an opaque-origin iframe. CORP's normal same-origin
+// default would block its font and other no-cors asset requests, so opt the archive's
+// asset responses — and only those — into cross-origin resource loading. They are
+// recognised by route, or by the source marker the resource producer sets, which also
+// covers assets answered on a viewer route or recovered by the leak handler below.
+// Registered before secureHeaders, so it wraps it and its value is the final header.
+app.use("*", async (c, next) => {
   await next();
-  setArchiveResourceHeaders(c.res.headers, c.req.header("Origin"));
+  const path = c.req.path;
+  if (
+    path.startsWith("/assets/") ||
+    path.startsWith("/_cw/r") ||
+    c.res.headers.get("X-Custom-Wayback-Source") === "on-demand-resource"
+  ) {
+    setArchiveResourceHeaders(c.res.headers, c.req.header("Origin"));
+  }
+  // The viewer's warm request to a separate frame origin is a no-cors POST; a
+  // same-origin resource policy would make the browser refuse the (empty) answer and
+  // log it as an error, though the warm itself went through.
+  if (path === "/_cw/warm") c.res.headers.set("Cross-Origin-Resource-Policy", "cross-origin");
 });
 
 app.use("*", logger());
@@ -303,7 +347,9 @@ app.get("/assets/:prefix/:hash", async (c) => {
 
 // Cold captures are rewritten to this same-origin route so the page's strict CSP
 // can allow archived resources without letting the browser contact live hosts.
-app.options("/_cw/resource", () =>
+// `/_cw/r/<ts>/<scheme>/<host><path>` is the current form (see `resourcePath` for why it
+// is path-shaped); `/_cw/resource?ts=&url=` is what pages cached before it still use.
+const preflight = () =>
   new Response(null, {
     status: 204,
     headers: {
@@ -312,13 +358,44 @@ app.options("/_cw/resource", () =>
       "Access-Control-Allow-Headers": "*",
       "Access-Control-Max-Age": "86400",
     },
-  }),
-);
+  });
+app.options("/_cw/resource", preflight);
+app.options("/_cw/r/*", preflight);
 app.get("/_cw/resource", (c) =>
-  fetchOnDemandResource(c.req.query("ts") ?? "", c.req.query("url") ?? "", c.env, c.executionCtx),
+  fetchOnDemandResource(
+    c.req.query("ts") ?? "",
+    c.req.query("url") ?? "",
+    c.env,
+    c.executionCtx,
+    c.req.header("Sec-Fetch-Dest") ?? "",
+  ),
 );
+app.get("/_cw/r/*", (c) => {
+  const url = new URL(c.req.url);
+  const resource = parseResourcePath(url.pathname, url.search);
+  if (!resource) return new Response("Invalid archived resource request", { status: 400 });
+  return fetchOnDemandResource(resource.ts, resource.url, c.env, c.executionCtx, c.req.header("Sec-Fetch-Dest") ?? "");
+});
+
+// The viewer asks the edge to prepare the pages a visitor is likely to open next
+// (`scheduleWarm`). Same-origin only: it is the viewer's own optimisation, not an
+// endpoint for other sites to make this Worker fetch from archive.org.
+app.post("/_cw/warm", async (c) => {
+  // From the viewer itself: same-origin, or — on the frame origin — the app origin.
+  const site = c.req.header("Sec-Fetch-Site");
+  const fromApp = frameAppOrigin(c.env) !== null && c.req.header("Origin") === frameAppOrigin(c.env);
+  if (site && site !== "same-origin" && !fromApp) return c.json({ error: "forbidden" }, 403);
+  const body = (await c.req.json().catch(() => null)) as { routes?: unknown } | null;
+  const accepted = scheduleWarm(c.env, c.executionCtx, new URL(c.req.url).origin, body?.routes);
+  return c.json({ accepted }, 202);
+});
 
 app.get("*", async (c) => {
+  // A root-relative URL an archived page built in script (`/images/hero.jpg`) arrives
+  // here, on the app's own origin. Its Referer says which capture it belongs to.
+  const leaked = leakedArchiveResource(c.req.raw);
+  if (leaked) return fetchOnDemandResource(leaked.ts, leaked.url, c.env, c.executionCtx, leaked.destination);
+
   const response = await c.env.ASSETS.fetch(c.req.raw);
   // Re-wrap before returning. A Response that came out of the ASSETS fetcher can
   // carry immutable headers, and middleware that runs after this handler

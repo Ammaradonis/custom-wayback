@@ -12,9 +12,11 @@
  *  - Nearest-capture badge when the served day differs from requested
  *  - Dead-request counter via postMessage bridge
  *  - Share button (plan §15): mints a link for exactly the page on screen
+ *  - Edge warming: the links the page reports, and any link the visitor hovers, are
+ *    prepared at the edge before they are clicked (`warmRoutes`)
  */
 
-import { useParams, useNavigate } from "react-router-dom";
+import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { lazy, Suspense, useState, useEffect, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -40,11 +42,105 @@ const ShareDialog = lazy(() =>
 
 interface CwMessage {
   __cw: true;
-  type: "cw:dead-request" | "cw:error" | "cw:navigate" | "cw:links" | "cw:metadata" | "cw:ready" | "cw:failure";
+  type:
+    | "cw:dead-request"
+    | "cw:error"
+    | "cw:navigate"
+    | "cw:links"
+    | "cw:intent"
+    | "cw:metadata"
+    | "cw:ready"
+    | "cw:failure";
   detail?: unknown;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Where archived pages are served from, when that is not this origin.
+ *
+ * With a separate frame origin (`apps/api/wrangler.frame.toml`) the iframe keeps
+ * `allow-same-origin`: the archived page gets a real origin — its cookies, storage,
+ * self-made frames and the browser cache all work as they did — and it is still walled
+ * off from this app, because that origin is not this one. Without it, archived code runs
+ * in an opaque origin here, which is the only safe way to run it on the app's own origin.
+ */
+const FRAME_ORIGIN = (() => {
+  try {
+    const configured = import.meta.env.VITE_FRAME_ORIGIN;
+    if (!configured) return null;
+    const origin = new URL(configured).origin;
+    return origin !== window.location.origin ? origin : null;
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * The iframe's sandbox. On this origin, deliberately no `allow-same-origin` (plan.md §10):
+ * archived code runs in an opaque origin, away from this app's session. It is granted only
+ * when the frame is a different origin, which is the one case it is safe.
+ * `allow-popups-to-escape-sandbox` lets an external link open the live site as an
+ * ordinary tab rather than a sandboxed one with no storage. The Worker sends the same
+ * flags as a CSP `sandbox` directive.
+ */
+const FRAME_SANDBOX = FRAME_ORIGIN
+  ? "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+  : "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox";
+
+/** The URL the iframe loads for a viewer route. */
+function frameUrl(route: string): string {
+  return FRAME_ORIGIN ? `${FRAME_ORIGIN}${route}` : route;
+}
+
+/** The origin messages from the archived page arrive from: its own, or "null" when opaque. */
+const FRAME_MESSAGE_ORIGIN = FRAME_ORIGIN ?? "null";
+
+/** Hover-driven warms per page view: enough for real intent, not a sweep of the page. */
+const MAX_INTENT_WARMS = 10;
+
+/** Pages per warm request (the Worker's `WARM_LIMIT`), and the pause between batches. */
+const WARM_BATCH = 2;
+const WARM_BATCH_GAP_MS = 1500;
+
+/**
+ * Ask the edge to prepare pages before they are opened.
+ *
+ * The service worker cannot do this: a sandboxed iframe's navigations are not controlled
+ * by it and its opaque origin has no HTTP cache, so a page prefetched into the browser
+ * was never used. The edge cache is the one the iframe does read, so a warmed page opens
+ * as an edge hit instead of an archive.org round trip. Fire-and-forget by design.
+ */
+function warmRoutes(routes: string[]): void {
+  if (routes.length === 0) return;
+  // To the origin that serves the frame, since that is whose edge cache it reads. A
+  // plain-text body keeps the cross-origin form a simple request: no preflight, and no
+  // response is needed.
+  void fetch(frameUrl("/_cw/warm"), {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ routes }),
+    keepalive: true,
+    ...(FRAME_ORIGIN ? { mode: "no-cors" as const } : {}),
+  }).catch(() => undefined);
+}
+
+/** `/a/<domain>/<day>/<path>` → the original URL, for the address bar and the archive link. */
+function originalUrlForRoute(route: string, domain: string): string {
+  const match = /^\/a\/[^/]+\/\d{4}-\d{2}-\d{2}(\/[^#]*)?/.exec(route);
+  let path = match?.[1] || "/";
+  const queryAt = path.toLowerCase().indexOf("%3f");
+  if (queryAt >= 0) {
+    let query = path.slice(queryAt + 3);
+    try {
+      query = decodeURIComponent(query);
+    } catch {
+      // Shown as-is.
+    }
+    path = `${path.slice(0, queryAt) || "/"}?${query}`;
+  }
+  return `https://${domain}${path}`;
+}
 
 function fmtBytes(n: number | null | undefined): string {
   if (n == null) return "—";
@@ -87,15 +183,31 @@ function pageUrlForRoute(
 
 export default function ViewerPage() {
   const { domain = "", day = "" } = useParams<{ domain: string; day: string }>();
-  const wildcard = useParams()["*"] ?? "";
+  // The route as navigated, still percent-encoded. Rebuilding it from the decoded params
+  // turned a captured query (`/page%3Fid=7`) into a real `?id=7`, which the Worker
+  // ignores, so the frame showed the page without its query.
+  const routePath = useLocation().pathname;
   const navigate = useNavigate();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const dayStripRef = useRef<HTMLDivElement>(null);
   const loadingFallbackRef = useRef<number | null>(null);
   const runtimeReadyRef = useRef(false);
+  /** Routes already sent to the edge this session, so no page is warmed twice. */
+  const warmedRef = useRef<Set<string>>(new Set());
+  const intentWarmsRef = useRef(0);
 
-  const [currentRoute, setCurrentRoute] = useState(`/a/${domain}/${day}/${wildcard}`);
-  const [navStack, setNavStack] = useState<string[]>([`/a/${domain}/${day}/${wildcard}`]);
+  /** The page on screen: the address bar, Back, Share. */
+  const [currentRoute, setCurrentRoute] = useState(routePath);
+  /**
+   * What the iframe was told to load. It differs from `currentRoute` after the frame
+   * followed a redirect (samsung.com's `/` → `/us/`): the address catches up with the
+   * page, and the frame is not reloaded to get there.
+   */
+  const [frameRoute, setFrameRoute] = useState(routePath);
+  const currentRouteRef = useRef(routePath);
+  /** Set when the route changed only to describe where the frame already is. */
+  const syncedRouteRef = useRef<string | null>(null);
+  const [navStack, setNavStack] = useState<string[]>([routePath]);
   const [deadCount, setDeadCount] = useState(0);
   const [lastBlockedRequest, setLastBlockedRequest] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -108,11 +220,20 @@ export default function ViewerPage() {
   const [loadStage, setLoadStage] = useState("Finding archived page");
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
 
-  // Keep currentRoute in sync when React Router params change (e.g. day-strip click
-  // triggers a navigate() which remounts with new params).
+  // Keep currentRoute in sync when the route changes (e.g. day-strip click triggers a
+  // navigate() which remounts with new params).
   useEffect(() => {
-    const route = `/a/${domain}/${day}/${wildcard}`;
+    const route = routePath;
+    currentRouteRef.current = route;
     setCurrentRoute(route);
+    if (syncedRouteRef.current === route) {
+      // The frame is already showing this page; only the address had to catch up.
+      syncedRouteRef.current = null;
+      setNavStack((s) => (s.length > 0 ? [...s.slice(0, -1), route] : [route]));
+      warmedRef.current.add(route);
+      return;
+    }
+    setFrameRoute(route);
     setNavStack((s) => {
       // Avoid duplicating the same route at the top of the stack.
       if (s[s.length - 1] === route) return s;
@@ -126,6 +247,8 @@ export default function ViewerPage() {
     setDeltaDays(null);
     setSource(null);
     runtimeReadyRef.current = false;
+    intentWarmsRef.current = 0;
+    warmedRef.current.add(route);
     if (loadingFallbackRef.current !== null) {
       window.clearTimeout(loadingFallbackRef.current);
       loadingFallbackRef.current = null;
@@ -138,7 +261,7 @@ export default function ViewerPage() {
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [domain, day, wildcard]);
+  }, [routePath]);
 
   // Derive month from day.
   const month = day.slice(0, 7);
@@ -160,6 +283,7 @@ export default function ViewerPage() {
   useEffect(() => {
     function onMessage(e: MessageEvent) {
       if (e.source !== iframeRef.current?.contentWindow) return;
+      if (e.origin !== FRAME_MESSAGE_ORIGIN) return;
       if (!e.data || (e.data as CwMessage).__cw !== true) return;
       const msg = e.data as CwMessage;
       if (msg.type === "cw:dead-request") {
@@ -186,6 +310,14 @@ export default function ViewerPage() {
         }
         setLoading(false);
       } else if (msg.type === "cw:ready") {
+        // A redirect inside the frame (a site's `/` → `/us/`, a missing page → the
+        // nearest day) leaves the frame on another route: show that one, as a browser's
+        // address bar would, without reloading the frame.
+        const shown = (msg.detail as { path?: unknown } | null)?.path;
+        if (typeof shown === "string" && shown.startsWith("/a/") && shown !== currentRouteRef.current) {
+          syncedRouteRef.current = shown;
+          navigate(shown, { replace: true });
+        }
         runtimeReadyRef.current = true;
         if (loadingFallbackRef.current !== null) {
           window.clearTimeout(loadingFallbackRef.current);
@@ -203,18 +335,35 @@ export default function ViewerPage() {
           goRoute(m?.[1] ?? day, url, detail.replace !== true);
         }
       } else if (msg.type === "cw:links") {
-        // Runtime sent back its top in-site links for SW prefetch.
-        const links = (msg.detail as { urls?: string[] })?.urls;
+        // The page's top in-site links: its own navigation, usually the next click.
+        const links = (msg.detail as { urls?: unknown })?.urls;
+        if (Array.isArray(links)) {
+          const fresh = links
+            .filter((url): url is string => typeof url === "string" && url.startsWith("/a/"))
+            .filter((url) => !warmedRef.current.has(url))
+            .slice(0, 6);
+          for (const url of fresh) warmedRef.current.add(url);
+          // Small batches a moment apart rather than one burst: each warm request
+          // prepares a couple of pages and what they need to paint (see `scheduleWarm`).
+          for (let start = 0; start < fresh.length; start += WARM_BATCH) {
+            const batch = fresh.slice(start, start + WARM_BATCH);
+            const delay = (start / WARM_BATCH) * WARM_BATCH_GAP_MS;
+            if (delay === 0) warmRoutes(batch);
+            else window.setTimeout(() => warmRoutes(batch), delay);
+          }
+        }
+      } else if (msg.type === "cw:intent") {
+        // The visitor is hovering or touching a link: warm it while they decide.
+        const url = (msg.detail as { url?: unknown })?.url;
         if (
-          Array.isArray(links) &&
-          links.length > 0 &&
-          "serviceWorker" in navigator &&
-          navigator.serviceWorker.controller
+          typeof url === "string" &&
+          url.startsWith("/a/") &&
+          !warmedRef.current.has(url) &&
+          intentWarmsRef.current < MAX_INTENT_WARMS
         ) {
-          navigator.serviceWorker.controller.postMessage({
-            type: "PREFETCH",
-            urls: links.slice(0, 8),
-          });
+          intentWarmsRef.current += 1;
+          warmedRef.current.add(url);
+          warmRoutes([url]);
         }
       }
     }
@@ -261,7 +410,9 @@ export default function ViewerPage() {
       window.clearTimeout(loadingFallbackRef.current);
       loadingFallbackRef.current = null;
     }
-    if (iframeRef.current) iframeRef.current.src = currentRoute;
+    // One navigation either way: a changed `src` prop reloads the frame by itself.
+    if (frameRoute !== currentRoute) setFrameRoute(currentRoute);
+    else if (iframeRef.current) iframeRef.current.src = frameUrl(currentRoute);
   }
 
   function handleBack() {
@@ -276,15 +427,19 @@ export default function ViewerPage() {
   }
 
   function handleOpenWayback() {
+    // Pages opened on demand are not in the crawl manifest; the archive resolves the
+    // day itself, so the route is enough.
     const page = manifest?.pages.find((p) => p.route === currentRoute);
-    if (!page) return;
-    window.open(`https://web.archive.org/web/${page.ts}/${page.url}`, "_blank", "noopener");
+    const stamp = page?.ts ?? `${(resolvedDay ?? day).replace(/-/g, "")}120000`;
+    const url = page?.url ?? originalUrlForRoute(currentRoute, domain);
+    window.open(`https://web.archive.org/web/${stamp}/${url}`, "_blank", "noopener");
   }
 
+  /** What a browser's address bar would show: the original URL, not our route. */
   const urlLabel = (() => {
     try {
       const page = manifest?.pages.find((p) => p.route === currentRoute);
-      return page ? `https://${domain}${new URL(page.url).pathname}` : currentRoute;
+      return page ? `https://${domain}${new URL(page.url).pathname}` : originalUrlForRoute(currentRoute, domain);
     } catch {
       return currentRoute;
     }
@@ -554,9 +709,9 @@ export default function ViewerPage() {
             )}
             <iframe
               ref={iframeRef}
-              src={currentRoute}
+              src={frameUrl(frameRoute)}
               title={`Archived: ${domain} on ${day}`}
-              sandbox="allow-scripts allow-forms allow-popups"
+              sandbox={FRAME_SANDBOX}
               className="absolute inset-0 w-full h-full border-0 bg-white"
               onLoad={() => {
                 if (!runtimeReadyRef.current) {
@@ -573,11 +728,10 @@ export default function ViewerPage() {
                   frameWindow.postMessage({ __cw: true, type: "cw:request-metadata" }, "*");
                   frameWindow.postMessage({ __cw: true, type: "cw:request-failure" }, "*");
                   // The iframe is sandboxed without allow-same-origin, so
-                  // contentDocument is always null. Ask the runtime for its top
-                  // in-site links so the service worker can prefetch them.
-                  if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-                    frameWindow.postMessage({ __cw: true, type: "cw:request-links" }, "*");
-                  }
+                  // contentDocument is always null. The runtime reports its top
+                  // in-site links when the page is interactive; ask again in case
+                  // that message arrived before this listener did.
+                  frameWindow.postMessage({ __cw: true, type: "cw:request-links" }, "*");
                 }
               }}
             />
