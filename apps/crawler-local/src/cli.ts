@@ -5,6 +5,8 @@
  *   npm run crawl -- --domain=samsung.com --month=2024-03 --max-pages=25
  *   npm run serve -- --port=8787
  *   npm run stats
+ *   npm run login -- --api=https://<your app>.workers.dev
+ *   npm run publish -- --domain=samsung.com --month=2024-03
  *
  * Runtime: node >= 22.5 with --experimental-sqlite and --experimental-strip-types
  * (both wired up in package.json). The package uses explicit './x.ts' import
@@ -18,6 +20,9 @@ import { formatBytes, formatDuration, renderReport, writeReport } from './report
 import { startViewer } from './viewer.ts';
 import { Ledger } from './db.ts';
 import { ThrottleError } from './politeness.ts';
+import { PublishError, publishMonth, type PublishResult } from './publish.ts';
+import { SessionError, login, normaliseApi, prompt, resolveSession, saveSession, verifyToken, type Session } from './session.ts';
+import { FsBlobStore } from './storage.ts';
 
 const argv = process.argv.slice(2);
 const explicitCommand = argv[0] && !argv[0].startsWith('--') ? argv[0] : undefined;
@@ -115,6 +120,32 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  if (command === 'login') {
+    const outDir = flagValue('out', `${process.cwd()}/data`);
+    const apiFlag = flagValue('api', '');
+    if (!apiFlag) throw new SessionError("--api is required: the deployed app's address, e.g. https://custom-wayback-api.example.workers.dev");
+    const api = normaliseApi(apiFlag);
+    const given = flagValue('token', process.env.CW_TOKEN ?? '');
+    let session: Session;
+    if (given) {
+      await verifyToken(api, given);
+      session = { api, token: given, email: null, savedAt: Date.now() };
+    } else {
+      const email = flagValue('email', '') || (await prompt('Email: '));
+      const password = await prompt('Password: ', true);
+      session = { api, token: await login(api, email, password), email, savedAt: Date.now() };
+    }
+    const path = await saveSession(outDir, session);
+    log.info(`signed in to ${api}; the session is saved in ${path} and lasts 7 days`);
+    return 0;
+  }
+
+  if (command === 'publish') {
+    const opts = parseCrawlOptions(flags);
+    const session = await resolveSession(opts.outDir, flagValue('api', ''), flagValue('token', ''));
+    return publish(opts, session);
+  }
+
   if (command !== 'crawl') {
     log.error(`unknown command "${command}"`);
     printUsage();
@@ -122,6 +153,11 @@ async function main(): Promise<number> {
   }
 
   const opts = parseCrawlOptions(flags);
+  // Checked before crawling, so a stale session fails in a second rather than after
+  // an hour of polite fetching.
+  const session = flags.includes('--publish')
+    ? await resolveSession(opts.outDir, flagValue('api', ''), flagValue('token', ''))
+    : null;
   const crawler = new Crawler(opts, createLogger('crawl'));
   try {
     const report = await crawler.run();
@@ -131,19 +167,73 @@ async function main(): Promise<number> {
       log.error('nothing was ingested; check the domain/month, or try --refresh');
       return 1;
     }
-    return 0;
   } finally {
     crawler.close();
   }
+  return session ? publish(opts, session) : 0;
+}
+
+/** Upload the crawled month and say where to see it. */
+async function publish(
+  opts: { domain: string; month: string; outDir: string; dbPath: string },
+  session: Session,
+): Promise<number> {
+  const logger = createLogger('publish');
+  const ledger = new Ledger(opts.dbPath);
+  let result: PublishResult;
+  try {
+    logger.info(`publishing ${opts.domain} ${opts.month} to ${session.api}`);
+    result = await publishMonth(ledger, new FsBlobStore(opts.outDir), {
+      api: session.api,
+      token: session.token,
+      domain: opts.domain,
+      month: opts.month,
+      log: logger,
+    });
+  } finally {
+    ledger.close();
+  }
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  process.stdout.write(
+    `\npublished ${plural(result.pages, 'page', 'pages')} and ${plural(result.assetsUploaded, 'new asset', 'new assets')} ` +
+      `(${formatBytes(result.bytesUploaded)}); ${plural(result.assetsAlreadyThere, 'asset was', 'assets were')} already there.\n` +
+      (result.assetsNotCrawled > 0
+        ? `${plural(result.assetsNotCrawled, 'referenced file was', 'referenced files were')} never crawled; the viewer fetches those on demand.\n`
+        : '') +
+      'These pages are served from R2 and are never deleted after viewing.\n' +
+      (result.firstRoute ? `open: ${session.api}${result.firstRoute}\n` : '') +
+      '\n',
+  );
+  for (const failed of result.pagesFailed.slice(0, 10)) {
+    log.warn(`not published: ${failed.url} (${failed.day}): ${failed.reason}`);
+  }
+  return result.pagesFailed.length > 0 ? 1 : 0;
+}
+
+/**
+ * End the process with `code` by letting the event loop drain, not with `process.exit()`.
+ *
+ * On Windows, exiting while `fetch`'s connection pool is still closing a socket aborts
+ * Node with `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` (exit 127) — seen
+ * on Node 24 right after `login`. Drained, the process ends cleanly within a moment; the
+ * unref'd timer only fires if some handle never closes.
+ */
+function finish(code: number): void {
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), 5000).unref();
 }
 
 main()
-  .then((code) => process.exit(code))
+  .then(finish)
   .catch((err: unknown) => {
     if (err instanceof UsageError) {
       process.stderr.write(`\n${err.message}\n\n`);
       printUsage();
-      process.exit(2);
+      return finish(2);
+    }
+    if (err instanceof SessionError || err instanceof PublishError) {
+      process.stderr.write(`\n${err.message}\n\n`);
+      return finish(err instanceof SessionError ? 2 : 1);
     }
     if (err instanceof ThrottleError) {
       process.stderr.write(
@@ -153,9 +243,9 @@ main()
           `raise --min-delay-ms, or lower --max-pages.\n` +
           `URL: ${err.url}\n\n`,
       );
-      process.exit(3);
+      return finish(3);
     }
     const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
     process.stderr.write(`\ningest failed: ${message}\n\n`);
-    process.exit(1);
+    return finish(1);
   });

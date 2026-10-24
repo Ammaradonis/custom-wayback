@@ -261,6 +261,7 @@ export const BACKUP_TABLES: readonly TablePlan[] = [
       i("purged_at"),
       t("content_digest"),
       t("title"),
+      t("source"),
     ],
   },
   {

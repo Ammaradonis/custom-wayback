@@ -447,6 +447,23 @@ export const manifests = {
     ),
 };
 
+/** Pages the local crawler published for a month (`GET /v1/precrawl`, routes/precrawl.ts). */
+export interface PrecrawlStatus {
+  domain: string;
+  month: string;
+  pages: number;
+  days: number;
+  bytes: number;
+}
+
+export const precrawl = {
+  status: (domain: string, month: string) =>
+    request<PrecrawlStatus>(
+      "GET",
+      `/precrawl?domain=${encodeURIComponent(domain)}&month=${encodeURIComponent(month)}`,
+    ),
+};
+
 // ── Feature types ─────────────────────────────────────────────────────────────
 //
 // Search, compare, shares and exports were added to the API in Phase 5

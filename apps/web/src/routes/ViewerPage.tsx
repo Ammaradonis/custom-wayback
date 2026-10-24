@@ -14,6 +14,8 @@
  *  - Share button (plan §15): mints a link for exactly the page on screen
  *  - Edge warming: the links the page reports, and any link the visitor hovers, are
  *    prepared at the edge before they are clicked (`warmRoutes`)
+ *  - Rate-limit fallbacks: only when archive.org throttles a page, the reader's settings
+ *    (lib/fallbacks.ts) open a stored copy from a nearby day or archive.org's own replay
  */
 
 import { useLocation, useParams, useNavigate } from "react-router-dom";
@@ -25,17 +27,31 @@ import {
   Globe,
   Home,
   Info,
+  LifeBuoy,
   Package,
   RotateCw,
   Share2,
   X,
 } from "lucide-react";
 import { manifests, type ManifestPage } from "@/lib/api.js";
+import {
+  REPLAY_SANDBOX,
+  replayUrl,
+  routeOnDay,
+  throttleDetail,
+  useFallbackPrefs,
+  type ThrottleDetail,
+} from "@/lib/fallbacks.js";
 import type { ShareTarget } from "@/components/ShareDialog.js";
 
 /** Lazy: the viewer is the hot path, and sharing is a deliberate action. */
 const ShareDialog = lazy(() =>
   import("@/components/ShareDialog.js").then((mod) => ({ default: mod.ShareDialog })),
+);
+
+/** Lazy for the same reason: opened on purpose, or from a rate-limit notice. */
+const FallbackPanel = lazy(() =>
+  import("@/components/FallbackPanel.js").then((mod) => ({ default: mod.FallbackPanel })),
 );
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -50,8 +66,29 @@ interface CwMessage {
     | "cw:intent"
     | "cw:metadata"
     | "cw:ready"
-    | "cw:failure";
+    | "cw:failure"
+    | "cw:throttled";
   detail?: unknown;
+}
+
+/**
+ * Why what is on screen is not the viewer's own rendering of what was asked for, shown in
+ * a bar above the page with what can be done about it. Every case starts with archive.org
+ * refusing the Worker's request (HTTP 429).
+ */
+type FallbackNotice =
+  /** The requested day was throttled, so the nearest stored copy is on screen instead. */
+  | { kind: "stored"; requestedRoute: string; requestedDay: string; shownDay: string; detail: ThrottleDetail }
+  /** archive.org's own replay of the requested page is on screen. */
+  | { kind: "replay"; detail: ThrottleDetail }
+  /** The page was throttled and both fallbacks are off: the reader picks. */
+  | { kind: "throttled"; detail: ThrottleDetail }
+  /** The page loaded, but archive.org throttled some of the files it uses. */
+  | { kind: "files"; count: number; styles: number };
+
+/** The `YYYY-MM-DD` of a viewer route. */
+function dayOfRoute(route: string): string | null {
+  return /^\/a\/[^/]+\/(\d{4}-\d{2}-\d{2})/.exec(route)?.[1] ?? null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -220,6 +257,38 @@ export default function ViewerPage() {
   const [loadStage, setLoadStage] = useState("Finding archived page");
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
 
+  // ── Rate-limit fallbacks (lib/fallbacks.ts) ──
+  const [fallbacks, setFallbacks] = useFallbackPrefs();
+  /** Read by the message handler, which is not re-subscribed when the settings change. */
+  const fallbacksRef = useRef(fallbacks);
+  fallbacksRef.current = fallbacks;
+  const [fallbacksOpen, setFallbacksOpen] = useState(false);
+  /** archive.org's replay URL while it is on screen in place of the viewer's frame. */
+  const [replay, setReplay] = useState<string | null>(null);
+  const [notice, setNotice] = useState<FallbackNotice | null>(null);
+  /**
+   * Set just before the viewer moves itself to another route as a fallback, so the move
+   * keeps the notice that explains it (and, for a replay, never loads the viewer's frame).
+   */
+  const fallbackMoveRef = useRef<{ route: string; notice: FallbackNotice; replay: string | null } | null>(null);
+  /** At most one automatic move per navigation: a stored copy that fails cannot chain. */
+  const autoMovedRef = useRef(false);
+  /** `moveFrameTo`, for the message handler. */
+  const moveFrameRef = useRef<((route: string, notice: FallbackNotice) => void) | null>(null);
+  /**
+   * Set while the frame shows a page it was moved to in place, so its `src` still names
+   * the route before. The next navigation remounts the frame (`frameKey`): setting the
+   * same `frameRoute` again would not load anything.
+   */
+  const frameMovedRef = useRef(false);
+  const [frameKey, setFrameKey] = useState(0);
+  /**
+   * Failure pages already acted on, by their `id`. A failure page reports itself twice —
+   * when it runs, and when asked on load — and the second report can come from a page the
+   * frame has already left (same window, so `e.source` cannot tell them apart).
+   */
+  const handledFailuresRef = useRef<Set<string>>(new Set());
+
   // Keep currentRoute in sync when the route changes (e.g. day-strip click triggers a
   // navigate() which remounts with new params).
   useEffect(() => {
@@ -231,9 +300,19 @@ export default function ViewerPage() {
       syncedRouteRef.current = null;
       setNavStack((s) => (s.length > 0 ? [...s.slice(0, -1), route] : [route]));
       warmedRef.current.add(route);
+      // …or is on its way there, moved in place as a fallback (`moveFrameTo`).
+      const move = fallbackMoveRef.current;
+      if (move && move.route === route) {
+        fallbackMoveRef.current = null;
+        setNotice(move.notice);
+      }
       return;
     }
     setFrameRoute(route);
+    if (frameMovedRef.current) {
+      frameMovedRef.current = false;
+      setFrameKey((key) => key + 1);
+    }
     setNavStack((s) => {
       // Avoid duplicating the same route at the top of the stack.
       if (s[s.length - 1] === route) return s;
@@ -254,6 +333,18 @@ export default function ViewerPage() {
       loadingFallbackRef.current = null;
     }
     setViewerError(null);
+    // A move the viewer made itself, as a fallback, keeps the notice that explains it.
+    const move = fallbackMoveRef.current;
+    fallbackMoveRef.current = null;
+    if (move && move.route === route) {
+      setNotice(move.notice);
+      setReplay(move.replay);
+      if (move.replay) setLoadStage("Loading archive.org's replay");
+    } else {
+      autoMovedRef.current = false;
+      setNotice(null);
+      setReplay(null);
+    }
     return () => {
       if (loadingFallbackRef.current !== null) {
         window.clearTimeout(loadingFallbackRef.current);
@@ -281,6 +372,35 @@ export default function ViewerPage() {
 
   // postMessage bridge from iframe.
   useEffect(() => {
+    /**
+     * archive.org refused the Worker this page. Apply the reader's fallbacks in order:
+     * the nearest stored copy, then archive.org's own replay, then just say so.
+     */
+    function handleThrottle(detail: ThrottleDetail) {
+      const route = currentRouteRef.current;
+      setLoading(false);
+      const prefs = fallbacksRef.current;
+      if (prefs.storedCopy && detail.nearestStoredDay && !autoMovedRef.current) {
+        autoMovedRef.current = true;
+        moveFrameRef.current?.(routeOnDay(route, detail.nearestStoredDay), {
+          kind: "stored",
+          requestedRoute: route,
+          requestedDay: dayOfRoute(route) ?? day,
+          shownDay: detail.nearestStoredDay,
+          detail,
+        });
+        return;
+      }
+      if (prefs.replay) {
+        setLoading(true);
+        setLoadStage("Loading archive.org's replay");
+        setReplay(replayUrl(detail.ts, detail.url));
+        setNotice({ kind: "replay", detail });
+        return;
+      }
+      setNotice({ kind: "throttled", detail });
+    }
+
     function onMessage(e: MessageEvent) {
       if (e.source !== iframeRef.current?.contentWindow) return;
       if (e.origin !== FRAME_MESSAGE_ORIGIN) return;
@@ -301,14 +421,30 @@ export default function ViewerPage() {
         setDeltaDays(typeof detail?.deltaDays === "number" ? detail.deltaDays : null);
         setLoadStage("Rendering archived page");
       } else if (msg.type === "cw:failure") {
-        const detail = msg.detail as { message?: string } | null;
-        setViewerError(detail?.message ?? "The archived page could not be loaded. Try reloading.");
+        const failureId = (msg.detail as { id?: unknown } | null)?.id;
+        if (typeof failureId === "string") {
+          if (handledFailuresRef.current.has(failureId)) return;
+          handledFailuresRef.current.add(failureId);
+        }
         runtimeReadyRef.current = true;
         if (loadingFallbackRef.current !== null) {
           window.clearTimeout(loadingFallbackRef.current);
           loadingFallbackRef.current = null;
         }
+        const throttle = throttleDetail(msg.detail);
+        if (throttle) {
+          handleThrottle(throttle);
+          return;
+        }
+        const detail = msg.detail as { message?: string } | null;
+        setViewerError(detail?.message ?? "The archived page could not be loaded. Try reloading.");
         setLoading(false);
+      } else if (msg.type === "cw:throttled") {
+        // The page loaded, but archive.org refused some of its files.
+        const detail = msg.detail as { count?: unknown; styles?: unknown } | null;
+        const count = typeof detail?.count === "number" ? detail.count : 0;
+        const styles = typeof detail?.styles === "number" ? detail.styles : 0;
+        if (count > 0) setNotice((current) => (current && current.kind !== "files" ? current : { kind: "files", count, styles }));
       } else if (msg.type === "cw:ready") {
         // A redirect inside the frame (a site's `/` → `/us/`, a missing page → the
         // nearest day) leaves the frame on another route: show that one, as a browser's
@@ -410,9 +546,85 @@ export default function ViewerPage() {
       window.clearTimeout(loadingFallbackRef.current);
       loadingFallbackRef.current = null;
     }
+    // A stored copy is still a stored copy after a reload; anything else is retried.
+    setNotice((current) => (current?.kind === "stored" ? current : null));
+    if (replay) {
+      // Back to the viewer: its frame mounts again and loads the page itself.
+      setReplay(null);
+      setLoadStage("Finding archived page");
+      return;
+    }
     // One navigation either way: a changed `src` prop reloads the frame by itself.
-    if (frameRoute !== currentRoute) setFrameRoute(currentRoute);
+    if (frameMovedRef.current) {
+      frameMovedRef.current = false;
+      setFrameRoute(currentRoute);
+      setFrameKey((key) => key + 1);
+    } else if (frameRoute !== currentRoute) setFrameRoute(currentRoute);
     else if (iframeRef.current) iframeRef.current.src = frameUrl(currentRoute);
+  }
+
+  /**
+   * Show a stored copy instead of the page that could not be shown, as a replacement in
+   * every history: `location.replace` moves the frame without the entry a new `src` would
+   * add (Back would land on the failure), and the address is replaced to match.
+   */
+  function moveFrameTo(route: string, notice: FallbackNotice) {
+    fallbackMoveRef.current = { route, replay: null, notice };
+    syncedRouteRef.current = route;
+    setLoading(true);
+    setLoadStage("Opening the stored copy");
+    runtimeReadyRef.current = false;
+    const frameWindow = iframeRef.current?.contentWindow;
+    if (frameWindow) {
+      frameWindow.location.replace(frameUrl(route));
+      frameMovedRef.current = true;
+    } else {
+      // No frame to move: the route change below loads it.
+      syncedRouteRef.current = null;
+    }
+    navigate(route, { replace: true });
+  }
+  moveFrameRef.current = moveFrameTo;
+
+  /** Fallback 2 on request: archive.org's replay of this page, in place of the frame. */
+  function showReplay(detail: ThrottleDetail) {
+    setLoading(true);
+    setLoadStage("Loading archive.org's replay");
+    setReplay(replayUrl(detail.ts, detail.url));
+    setNotice({ kind: "replay", detail });
+  }
+
+  /** Fallback 1 on request: the nearest stored copy of this page. */
+  function openStoredCopy(detail: ThrottleDetail) {
+    if (!detail.nearestStoredDay) return;
+    moveFrameTo(routeOnDay(currentRoute, detail.nearestStoredDay), {
+      kind: "stored",
+      requestedRoute: currentRoute,
+      requestedDay: day,
+      shownDay: detail.nearestStoredDay,
+      detail,
+    });
+  }
+
+  /** From a stored copy, archive.org's replay of the day that was actually asked for. */
+  function replayRequestedDay(stored: Extract<FallbackNotice, { kind: "stored" }>) {
+    fallbackMoveRef.current = {
+      route: stored.requestedRoute,
+      replay: replayUrl(stored.detail.ts, stored.detail.url),
+      notice: { kind: "replay", detail: stored.detail },
+    };
+    navigate(stored.requestedRoute);
+  }
+
+  /** The page on screen as a replay request, for a page whose files were throttled. */
+  function currentPageCapture(): ThrottleDetail {
+    const page = manifest?.pages.find((p) => p.route === currentRoute);
+    return {
+      url: page?.url ?? originalUrlForRoute(currentRoute, domain),
+      ts: page?.ts ?? `${(resolvedDay ?? day).replace(/-/g, "")}120000`,
+      nearestStoredDay: null,
+      nearestStoredPrecrawled: false,
+    };
   }
 
   function handleBack() {
@@ -584,7 +796,23 @@ export default function ViewerPage() {
         </button>
         <button
           type="button"
-          onClick={() => setStatsOpen((s) => !s)}
+          onClick={() => {
+            setStatsOpen(false);
+            setFallbacksOpen((open) => !open);
+          }}
+          className="cw-btn cw-btn-ghost cw-btn-icon"
+          aria-label="When archive.org is rate-limiting"
+          aria-expanded={fallbacksOpen}
+          title="When archive.org is rate-limiting"
+        >
+          <LifeBuoy className="h-4 w-4" aria-hidden />
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setFallbacksOpen(false);
+            setStatsOpen((s) => !s);
+          }}
           className="cw-btn cw-btn-ghost cw-btn-icon"
           aria-label="Mirror stats"
           aria-expanded={statsOpen}
@@ -626,6 +854,79 @@ export default function ViewerPage() {
               </button>
             );
           })}
+        </div>
+      )}
+
+      {/* ── Rate-limit notice: what is on screen instead, and what to do about it ── */}
+      {notice && !monthIsEmpty && (
+        <div
+          role="status"
+          className="flex flex-none flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warning/40 bg-warning/10 px-3 py-1.5 text-xs"
+        >
+          <p className="min-w-0 flex-1 basis-64">
+            {notice.kind === "stored" &&
+              `archive.org is rate-limiting the viewer, so this is the ${notice.detail.nearestStoredPrecrawled ? "pre-crawled" : "stored"} copy from ${notice.shownDay} instead of ${notice.requestedDay}.`}
+            {notice.kind === "replay" &&
+              "archive.org is rate-limiting the viewer, so this page is archive.org's own replay. archive.org sees your IP address, and the viewer's links, prefetching and caching are off on it."}
+            {notice.kind === "throttled" &&
+              "archive.org is rate-limiting the viewer and refused this page. You can show it another way, or wait a minute and try again."}
+            {notice.kind === "files" &&
+              `archive.org rate-limited ${notice.count} of this page's files${notice.styles > 0 ? ", including its styles" : ""}, so parts of it may be missing.`}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {notice.kind === "stored" && (
+              <>
+                <button type="button" className="cw-btn cw-btn-secondary px-3 text-xs" onClick={() => navigate(notice.requestedRoute)}>
+                  Try {notice.requestedDay} again
+                </button>
+                {fallbacks.replay && (
+                  <button type="button" className="cw-btn cw-btn-secondary px-3 text-xs" onClick={() => replayRequestedDay(notice)}>
+                    Replay {notice.requestedDay} from archive.org
+                  </button>
+                )}
+              </>
+            )}
+            {notice.kind === "replay" && (
+              <button type="button" className="cw-btn cw-btn-secondary px-3 text-xs" onClick={handleReload}>
+                Try the viewer again
+              </button>
+            )}
+            {notice.kind === "throttled" && (
+              <>
+                {notice.detail.nearestStoredDay && (
+                  <button type="button" className="cw-btn cw-btn-secondary px-3 text-xs" onClick={() => openStoredCopy(notice.detail)}>
+                    Open the copy from {notice.detail.nearestStoredDay}
+                  </button>
+                )}
+                <button type="button" className="cw-btn cw-btn-secondary px-3 text-xs" onClick={() => showReplay(notice.detail)}>
+                  Show archive.org's replay
+                </button>
+                <button type="button" className="cw-btn cw-btn-ghost px-3 text-xs" onClick={handleReload}>
+                  Try again
+                </button>
+              </>
+            )}
+            {notice.kind === "files" && (
+              <>
+                <button type="button" className="cw-btn cw-btn-secondary px-3 text-xs" onClick={handleReload}>
+                  Reload
+                </button>
+                <button type="button" className="cw-btn cw-btn-secondary px-3 text-xs" onClick={() => showReplay(currentPageCapture())}>
+                  Show archive.org's replay
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className="cw-btn cw-btn-ghost px-3 text-xs"
+              onClick={() => {
+                setStatsOpen(false);
+                setFallbacksOpen(true);
+              }}
+            >
+              Settings
+            </button>
+          </div>
         </div>
       )}
 
@@ -707,34 +1008,54 @@ export default function ViewerPage() {
                 </div>
               </div>
             )}
-            <iframe
-              ref={iframeRef}
-              src={frameUrl(frameRoute)}
-              title={`Archived: ${domain} on ${day}`}
-              sandbox={FRAME_SANDBOX}
-              className="absolute inset-0 w-full h-full border-0 bg-white"
-              onLoad={() => {
-                if (!runtimeReadyRef.current) {
-                  if (loadingFallbackRef.current !== null) window.clearTimeout(loadingFallbackRef.current);
-                  loadingFallbackRef.current = window.setTimeout(() => {
-                    loadingFallbackRef.current = null;
-                    setLoading(false);
-                  }, 1200);
-                }
-                // Re-request these messages in case a very fast cached page posted
-                // before React attached its message listener.
-                const frameWindow = iframeRef.current?.contentWindow;
-                if (frameWindow) {
-                  frameWindow.postMessage({ __cw: true, type: "cw:request-metadata" }, "*");
-                  frameWindow.postMessage({ __cw: true, type: "cw:request-failure" }, "*");
-                  // The iframe is sandboxed without allow-same-origin, so
-                  // contentDocument is always null. The runtime reports its top
-                  // in-site links when the page is interactive; ask again in case
-                  // that message arrived before this listener did.
-                  frameWindow.postMessage({ __cw: true, type: "cw:request-links" }, "*");
-                }
-              }}
-            />
+            {replay ? (
+              // Fallback 2: archive.org's own replay. A separate element (`key`), so the
+              // sandbox it starts with is its own; no referrer, so archive.org is not
+              // told which page of this app sent the reader.
+              <iframe
+                key="replay"
+                src={replay}
+                title={`archive.org replay: ${domain} on ${day}`}
+                sandbox={REPLAY_SANDBOX}
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 w-full h-full border-0 bg-white"
+                onLoad={() => {
+                  setLoadStage("Page ready");
+                  setLoading(false);
+                }}
+              />
+            ) : (
+              <iframe
+                key={`viewer-${frameKey}`}
+                ref={iframeRef}
+                src={frameUrl(frameRoute)}
+                title={`Archived: ${domain} on ${day}`}
+                sandbox={FRAME_SANDBOX}
+                className="absolute inset-0 w-full h-full border-0 bg-white"
+                onLoad={() => {
+                  if (!runtimeReadyRef.current) {
+                    if (loadingFallbackRef.current !== null) window.clearTimeout(loadingFallbackRef.current);
+                    loadingFallbackRef.current = window.setTimeout(() => {
+                      loadingFallbackRef.current = null;
+                      setLoading(false);
+                    }, 1200);
+                  }
+                  // Re-request these messages in case a very fast cached page posted
+                  // before React attached its message listener.
+                  const frameWindow = iframeRef.current?.contentWindow;
+                  if (frameWindow) {
+                    frameWindow.postMessage({ __cw: true, type: "cw:request-metadata" }, "*");
+                    frameWindow.postMessage({ __cw: true, type: "cw:request-failure" }, "*");
+                    // The iframe is sandboxed without allow-same-origin, so
+                    // contentDocument is always null. The runtime reports its top
+                    // in-site links when the page is interactive; ask again in case
+                    // that message arrived before this listener did.
+                    frameWindow.postMessage({ __cw: true, type: "cw:request-links" }, "*");
+                    frameWindow.postMessage({ __cw: true, type: "cw:request-throttled" }, "*");
+                  }
+                }}
+              />
+            )}
           </>
         )}
       </div>
@@ -773,8 +1094,9 @@ export default function ViewerPage() {
                 ))}
               </div>
               <p className="text-xs text-muted-foreground">
-                Pages are deleted from R2 storage after they are served (storage-cost
-                strategy). The ledger row is kept so navigation still works.
+                Pages a cloud crawl stored are deleted from R2 storage after they are
+                served (storage-cost strategy); pre-crawled pages are kept. The ledger
+                row is kept so navigation still works.
               </p>
               {manifest.note && (
                 <p className="text-xs text-warning-foreground">{manifest.note}</p>
@@ -784,6 +1106,19 @@ export default function ViewerPage() {
             <p className="text-sm text-muted-foreground">Loading manifest…</p>
           )}
         </aside>
+      )}
+
+      {/* ── Rate-limit fallbacks ── */}
+      {fallbacksOpen && (
+        <Suspense fallback={null}>
+          <FallbackPanel
+            domain={domain}
+            month={month}
+            prefs={fallbacks}
+            onChange={setFallbacks}
+            onClose={() => setFallbacksOpen(false)}
+          />
+        </Suspense>
       )}
 
       {/* ── Toast ── */}

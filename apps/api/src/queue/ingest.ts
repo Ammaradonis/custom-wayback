@@ -124,7 +124,7 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
  * `/a/example.com/2024-01-01/example.com/2024-01-01/df1d87514b593031` and no
  * stored URL ends with that hash, so every route the manifest advertised 404'd.
  */
-function pageIdFor(url: string): string {
+export function pageIdFor(url: string): string {
   try {
     const parsed = new URL(url);
     let path = parsed.pathname;

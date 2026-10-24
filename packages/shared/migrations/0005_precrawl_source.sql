@@ -1,0 +1,15 @@
+-- Pre-crawled pages: what the local crawler publishes into R2 (crawl-local publish).
+--
+-- WHY A SOURCE COLUMN
+-- The post-serve purge deletes a page's blob from R2 once it has been read, which is
+-- right for what the cloud crawl stores: archive.org can serve that page again. A
+-- pre-crawled page exists because archive.org would not serve it to the Worker (it
+-- rate-limits the Worker's requests far harder than a reader's own connection), so
+-- deleting it after one view would throw away the only copy the viewer can reach.
+-- source = 'local' marks those rows and the purge skips them. NULL is the cloud crawl,
+-- which is every row that existed before this migration.
+--
+-- NOTE FOR MAINTAINERS
+-- No sql comment in this file may begin with two dashes followed by a greater-than
+-- sign: D1 splits migrations on a statement breakpoint marker of exactly that shape.
+ALTER TABLE `snapshots` ADD COLUMN `source` text;

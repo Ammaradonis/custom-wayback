@@ -361,6 +361,46 @@
     outline: 2px solid var(--color-ring);
     outline-offset: 1px;
   }
+
+  /* ── Switch: the visual half of an on/off setting ────────────────────────
+   * Drawn inside a <button role="switch" aria-checked> that spans the whole
+   * setting row, so the touch target is the row rather than this 24px pill. */
+  .cw-switch {
+    position: relative;
+    flex: none;
+    width: 2.75rem;
+    height: 1.5rem;
+    border-radius: 9999px;
+    border: 1px solid var(--color-border);
+    background-color: var(--color-muted);
+    transition: background-color 120ms ease, border-color 120ms ease;
+  }
+  .cw-switch::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 0.1875rem;
+    width: 1.0625rem;
+    height: 1.0625rem;
+    border-radius: 9999px;
+    background-color: var(--color-muted-foreground);
+    transform: translateY(-50%);
+    transition: transform 120ms ease, background-color 120ms ease;
+  }
+  [aria-checked="true"] > .cw-switch {
+    background-color: var(--color-accent);
+    border-color: var(--color-accent);
+  }
+  [aria-checked="true"] > .cw-switch::after {
+    background-color: var(--color-accent-foreground);
+    transform: translate(1.25rem, -50%);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cw-switch,
+    .cw-switch::after {
+      transition: none;
+    }
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════════════

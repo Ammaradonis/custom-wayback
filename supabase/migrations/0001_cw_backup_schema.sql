@@ -166,7 +166,9 @@ create table if not exists cw_backup.snapshots (
   served_at      bigint,
   purged_at      bigint,
   content_digest text,
-  title          text
+  title          text,
+  -- 'local' for a page published by the local crawler; see 0003_snapshot_source.sql.
+  source         text
 );
 create index if not exists snapshots_domain_day on cw_backup.snapshots (domain, day);
 create index if not exists snapshots_ingest on cw_backup.snapshots (ingest_id);

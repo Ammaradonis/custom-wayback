@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Phase 1: local ingestion of one domain and one month from the Wayback Machine into a browsable local mirror. Self-contained; no Cloudflare account, no cloud spend.",
+  "description": "Local ingestion of one domain and one month from the Wayback Machine, through your own connection: a browsable local mirror, publishable to a deployed viewer's R2 (npm run publish).",
   "bin": {
     "crawl-local": "./src/cli.ts"
   },
@@ -11,6 +11,8 @@
     "crawl": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts crawl",
     "serve": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts serve",
     "stats": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts stats",
+    "login": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts login",
+    "publish": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts publish",
     "dev": "node --experimental-sqlite --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json --noEmit",

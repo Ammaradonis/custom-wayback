@@ -116,7 +116,16 @@ export const ARCHIVE_SUBRESOURCE_DESTINATIONS: ReadonlySet<string> = new Set([
   "xslt",
 ]);
 
-function viewerFailure(status: number, title: string, message: string): Response {
+/**
+ * A designed error page for the frame, which also tells the viewer what happened:
+ * `cw:failure` carries `status`, `message` and anything in `extra` (a throttled page's
+ * fallbacks, see `throttledPage`).
+ *
+ * The page reports itself twice — when it runs, and again when the viewer asks — and the
+ * second report can arrive after the viewer has already moved the frame on, from the
+ * same window. `id` is what lets the viewer act on each page once.
+ */
+function viewerFailure(status: number, title: string, message: string, extra: Record<string, unknown> = {}): Response {
   const escapeHtml = (value: string) =>
     value.replace(/[&<>"']/g, (character) => {
       const entities: Record<string, string> = {
@@ -128,7 +137,7 @@ function viewerFailure(status: number, title: string, message: string): Response
       };
       return entities[character] ?? character;
     });
-  const detail = JSON.stringify({ status, message }).replace(/</g, "\\u003c");
+  const detail = JSON.stringify({ ...extra, id: crypto.randomUUID(), status, message }).replace(/</g, "\\u003c");
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main><script>var detail=${detail};function reportFailure(){window.parent.postMessage({__cw:true,type:'cw:failure',detail:detail},'*')}window.addEventListener('message',function(event){if(event.data&&event.data.__cw===true&&event.data.type==='cw:request-failure')reportFailure()});reportFailure()</script></body></html>`;
   return new Response(html, {
     status,
@@ -341,10 +350,43 @@ const THROTTLED_HEADER = "X-Custom-Wayback-Archive";
 const THROTTLE_KEY = "https://cache.internal/_cw/archive-throttled";
 const THROTTLE_SECONDS = 120;
 
-/** Tag a failure as archive.org's 429, so a prefetch can tell it from a broken page. */
+/**
+ * Tag a failure as archive.org's 429, so a prefetch can tell it from a broken page.
+ *
+ * `Server-Timing` is the one part of a failed subresource's response that a page's script
+ * can read (resource timing — `Timing-Allow-Origin` admits the sandbox's opaque origin
+ * too), so the runtime can count the files archive.org throttled and the viewer can say
+ * why a page looks broken (`cw:throttled`).
+ */
 function throttled(response: Response): Response {
   response.headers.set(THROTTLED_HEADER, "throttled");
+  response.headers.set("Server-Timing", "cw-throttled");
+  response.headers.set("Timing-Allow-Origin", "*");
   return response;
+}
+
+/**
+ * What the viewer needs to fall back when archive.org throttled a page, rather than only
+ * show the error: the capture to ask archive.org's own replay for, and the nearest day
+ * whose copy of the page is already in R2. Which of those it uses is the reader's choice
+ * (apps/web/src/lib/fallbacks.ts).
+ */
+interface ThrottledPage {
+  url: string;
+  ts: string;
+  nearestStoredDay: string | null;
+  nearestStoredPrecrawled: boolean;
+}
+
+function throttledPage(page: ThrottledPage): Response {
+  return throttled(
+    viewerFailure(
+      502,
+      "The archive could not serve this page",
+      "archive.org is rate-limiting requests right now. Wait a minute, then reload.",
+      { reason: "archive-throttled", ...page },
+    ),
+  );
 }
 
 function noteThrottle(ctx: Deferrer | undefined): void {
@@ -491,6 +533,40 @@ async function findSnapshot(
     .first<SnapshotRow>();
 }
 
+/**
+ * The nearest *other* day whose copy of `pageId` is in R2 — servable without archive.org.
+ *
+ * Offered to the viewer when archive.org throttles a page (`throttledPage`). Unlike
+ * `nearestDay`, a row whose blob was purged does not count: opening it would ask
+ * archive.org again, which is what just failed.
+ */
+async function nearestStoredDay(
+  env: Env,
+  domain: string,
+  day: string,
+  pageId: string,
+  windowDays = 62,
+): Promise<{ day: string; precrawled: boolean } | null> {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT day, source
+       FROM snapshots
+       WHERE domain = ? AND page_id = ? AND day != ?
+         AND r2_key IS NOT NULL AND purged_at IS NULL
+         AND mime LIKE 'text/html%'
+         AND ABS(julianday(day) - julianday(?)) <= ?
+       ORDER BY ABS(julianday(day) - julianday(?)) ASC, day ASC
+       LIMIT 1`,
+    )
+      .bind(domain, pageId, day, day, windowDays, day)
+      .first<{ day: string; source: string | null }>();
+    return row ? { day: row.day, precrawled: row.source === "local" } : null;
+  } catch {
+    // An offer, not the answer: without it the viewer still has archive.org's replay.
+    return null;
+  }
+}
+
 /** The closest day to `day` that has a capture of `pageId`, within `windowDays`. */
 async function nearestDay(
   env: Env,
@@ -605,6 +681,19 @@ async function renderSnapshotPage(
       return renderCapture(capture, { domain, day, origin, frameRole: frameAppOrigin(env) !== null, critical });
     }
     if (capture.kind === "redirect") return captureRedirect(capture.route);
+    if (capture.kind === "error" && capture.status === 429) {
+      noteThrottle(ctx);
+      // A throttle says nothing about whether the page was captured, so none of the
+      // "nothing was captured" redirects below apply. The viewer is told what it can
+      // fall back to instead, and the reader's settings choose.
+      const stored = warming ? null : await nearestStoredDay(env, domain, day, path);
+      return throttledPage({
+        url: urlForSnapshotRoute(domain, path),
+        ts: dayTimestamp(day),
+        nearestStoredDay: stored?.day ?? null,
+        nearestStoredPrecrawled: stored?.precrawled ?? false,
+      });
+    }
     if (capture.kind === "error") archiveTrouble = capture;
   }
 
@@ -662,22 +751,13 @@ async function renderSnapshotPage(
       }
     }
 
-    // An archive that was down or throttling is not "nothing was captured": say which.
+    // An archive that was down is not "nothing was captured": say so. (A throttle was
+    // answered above, before any of this.)
     if (archiveTrouble?.kind === "error") {
-      if (archiveTrouble.status !== 429) {
-        return viewerFailure(
-          502,
-          "The archive could not serve this page",
-          `archive.org answered HTTP ${archiveTrouble.status}. Reload to try again.`,
-        );
-      }
-      noteThrottle(ctx);
-      return throttled(
-        viewerFailure(
-          502,
-          "The archive could not serve this page",
-          "archive.org is rate-limiting requests right now. Wait a minute, then reload.",
-        ),
+      return viewerFailure(
+        502,
+        "The archive could not serve this page",
+        `archive.org answered HTTP ${archiveTrouble.status}. Reload to try again.`,
       );
     }
 
@@ -753,7 +833,10 @@ function prepareCachedSnapshot(
     deltaDays: deltaDays ?? 0,
     resourceProxy: true,
   });
-  const runtimeMarkup = `<style id="${RUNTIME_STYLE_ID}">${RUNTIME_CSS}</style><script id="${RUNTIME_SCRIPT_ID}">${RUNTIME_SCRIPT}</script>`;
+  // `data-cw-current` marks what this function injects, so the handlers below remove only
+  // the copies stored with the page. lol-html never shows a handler markup it inserted,
+  // but nothing here should depend on that — the tests' stand-in does show it.
+  const runtimeMarkup = `<style id="${RUNTIME_STYLE_ID}" data-cw-current>${RUNTIME_CSS}</style><script id="${RUNTIME_SCRIPT_ID}" data-cw-current>${RUNTIME_SCRIPT}</script>`;
   let headSeen = false;
   const rewritten = new HTMLRewriter()
     .on("head", {
@@ -763,9 +846,11 @@ function prepareCachedSnapshot(
         el.prepend(`${metaTagsHtml({ "cw-mirror": mirrorContent })}${runtimeMarkup}`, { html: true });
       },
     })
-    .on(`script#${RUNTIME_SCRIPT_ID}`, { element(el) { el.remove(); } })
+    .on(`script#${RUNTIME_SCRIPT_ID}`, {
+      element(el) { if (!el.hasAttribute("data-cw-current")) el.remove(); },
+    })
     .on(`style#${RUNTIME_STYLE_ID}`, {
-      element(el) { el.remove(); },
+      element(el) { if (!el.hasAttribute("data-cw-current")) el.remove(); },
     })
     .on("a[data-cw-dead]", {
       element(el) {
@@ -790,7 +875,8 @@ function prepareCachedSnapshot(
           el.remove();
           return;
         }
-        if ((el.getAttribute("name") ?? "").trim().toLowerCase() === "cw-mirror") el.remove();
+        const name = (el.getAttribute("name") ?? "").trim().toLowerCase();
+        if (name === "cw-mirror" && el.getAttribute("content") !== mirrorContent) el.remove();
       },
     })
     .transform(response);
@@ -1119,9 +1205,14 @@ export async function fetchOnDemand(
     return viewerFailure(502, "The archive could not be reached", "The archived page could not be downloaded. Reload to try again.");
   }
   if (capture.kind === "error" && capture.status === 429) {
-    return throttled(
-      viewerFailure(502, "The archive could not serve this page", "archive.org is rate-limiting requests right now. Wait a minute, then reload."),
-    );
+    // The ledger knows this capture exactly, so the replay fallback can ask for it.
+    const stored = await nearestStoredDay(env, domain, day, path);
+    return throttledPage({
+      url: safeHttpUrl(options.sourceUrl) ?? urlForSnapshotRoute(domain, path),
+      ts,
+      nearestStoredDay: stored?.day ?? null,
+      nearestStoredPrecrawled: stored?.precrawled ?? false,
+    });
   }
   if (capture.kind !== "page") {
     return viewerFailure(502, "The archive could not serve this page", `The archived page returned HTTP ${capture.status}. Reload to try again.`);

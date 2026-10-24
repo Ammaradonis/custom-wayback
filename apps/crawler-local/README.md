@@ -25,6 +25,10 @@ npm run serve
 
 # What have I ingested so far?
 npm run stats
+
+# Publish a crawled month to your deployed viewer's R2 (sign in once first)
+npm run login -- --api=https://<your app>.workers.dev
+npm run publish -- --domain=samsung.com --month=2024-03
 ```
 
 Requirements: **Node 22.5+** (24 recommended). Two experimental flags are wired into the npm
@@ -135,12 +139,40 @@ If you ever intend to run this at multi-user scale, contact `info@archive.org` /
 
 ---
 
+## Publishing to a deployed viewer
+
+archive.org rate-limits a Cloudflare Worker's requests far harder than a home connection — at
+times it refuses most of them, and a page the deployed viewer has to fetch then cannot be shown.
+This crawler fetches through *your* connection, so a month crawled here can be handed to the
+deployment instead:
+
+```bash
+npm run login -- --api=https://<your app>.workers.dev        # once: email + password (7-day session)
+npm run crawl -- --domain=apple.com --month=2024-03 --publish  # crawl, then publish
+npm run publish -- --domain=apple.com --month=2024-03          # or publish an earlier crawl
+```
+
+`publish` (src/publish.ts) uploads the month's rewritten pages and every file they use — including
+what their stylesheets use — to `/v1/precrawl` on the deployment, assets first. It asks which files
+the deployment already has and sends only the rest, so publishing again costs only what changed,
+and it makes **no** archive.org requests. The deployment keeps those pages in R2 for good (the
+post-serve purge skips them) and serves them without asking archive.org. Network errors, 429s and
+5xx answers are retried with backoff; a page the deployment refuses is reported and the rest go on.
+
+The session is saved in `data/publish-session.json` (git-ignored, like all of `data/`);
+`--token=` or `CW_TOKEN` uses a token instead. `crawl --publish` checks the session *before*
+crawling, so an expired one fails in a second rather than after the crawl.
+
+---
+
 ## CLI reference
 
 ```
 npm run crawl -- --domain=<domain> --month=YYYY-MM [options]
 npm run serve [--port=8787]
 npm run stats [--domain=<domain>]
+npm run login -- --api=<app url> [--email=<email>] [--token=<token>]
+npm run publish -- --domain=<domain> --month=YYYY-MM [--api=<app url>] [--token=<token>]
 npm test
 ```
 
@@ -163,6 +195,9 @@ npm test
 | `--refresh` | off | Ignore the cached survey and re-query CDX. |
 | `--out=<dir>` / `--db=<path>` | `./data` | Blob store root and ledger path. |
 | `--contact=<string>` | `local-phase1` | Contact string embedded in the User-Agent. |
+| `--publish` | off | After the crawl, publish the month to the deployment signed in with `login`. |
+| `--api=<url>` | saved session | The deployed app (`login`, `publish`): `https://`, or `http://` for localhost. |
+| `--token=<token>` | saved session | A session token instead of the saved sign-in (also `CW_TOKEN`). |
 
 ---
 
@@ -265,7 +300,7 @@ rewrite.
 ## Tests
 
 ```bash
-npm test        # 33 tests, offline, no archive.org requests
+npm test        # 45 tests, offline, no archive.org requests
 ```
 
 The suite covers the parts where the real logic lives, and never depends on archive.org being

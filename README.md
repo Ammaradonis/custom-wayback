@@ -158,13 +158,66 @@ npx --no-install pnpm exec wrangler dev -c wrangler.frame.toml --port 8789 --loc
 # and build the web app with $env:VITE_FRAME_ORIGIN = "http://127.0.0.1:8789"
 ```
 
+### When archive.org rate-limits the viewer
+
+archive.org answers the Worker's own requests with HTTP 429 far more often than a person's
+connection: on 24 October 2026 it refused 9 of 10 from the production Worker while the same
+captures loaded normally from a home connection. A page the Worker has to fetch then cannot be
+shown. Two fallbacks cover that case, and **only** that case — a page that loads is never touched:
+
+| Fallback | What the reader sees | Trade-off |
+|---|---|---|
+| **A stored copy from the nearest day** | The same page from the closest day whose copy is in R2 — pre-crawled (below) or kept by a crawl — with every viewer feature. A bar says which day it is from and offers to try the requested day again | It is another day of the page |
+| **archive.org's own replay** | `web.archive.org/web/<ts>if_/<url>` in the frame, loaded by the reader's own browser | archive.org sees the reader's IP address, and the viewer's links, prefetching and edge caching don't work on that page |
+
+Both are on by default and tried in that order. Each is a switch in the viewer's **When archive.org
+is rate-limiting** panel (the life-buoy button), saved per browser; with both off, the page shows the
+error and a bar offering either one for that page. When a page loads but archive.org refused some of
+its files, the bar says how many and offers the replay.
+
+How it fits together: on a 429 the Worker answers the frame with a failure page whose `cw:failure`
+detail carries `reason: "archive-throttled"`, the capture's URL and timestamp, and the nearest day
+with a stored copy (`throttledPage` and `nearestStoredDay` in `apps/api/src/routes/viewer.ts`).
+A throttled file carries `Server-Timing: cw-throttled`, the one part of a failed response a page can
+read, and the runtime counts those. The shell applies the reader's settings
+(`apps/web/src/lib/fallbacks.ts`). The replay frame is sandboxed without forms or top navigation,
+and sends no referrer.
+
+#### Pre-crawling with the local crawler
+
+The local crawler fetches through your own connection, which archive.org rarely throttles, and can
+publish what it crawled into the deployment's R2:
+
+```powershell
+cd apps\crawler-local
+npm run login -- --api=https://custom-wayback-api.ammar-webalchemist.workers.dev   # once; asks for email and password
+npm run crawl -- --domain=apple.com --month=2024-03 --publish                       # crawl, then publish
+npm run publish -- --domain=apple.com --month=2024-03                                # publish an earlier crawl
+```
+
+`publish` sends the month's rewritten pages and every file they use, stylesheets' own fonts and
+images included — assets first, so no page is visible before what it needs. Only files the Worker
+lacks are uploaded, and R2 checks each one's SHA-256 against its key. The pages are recorded with
+`snapshots.source = 'local'` (migration `0005_precrawl_source.sql`) and **the post-serve purge never
+deletes them**; the viewer serves them like any stored page, with the current runtime, policy and
+sandbox, and without an archive.org request. Publishing needs a signed-in account, and accounts exist
+only for `ALLOWED_EMAILS`. The session lasts 7 days and is kept in
+`apps/crawler-local/data/publish-session.json` (git-ignored); `CW_TOKEN` overrides it. The viewer's
+panel shows how many pages of the month on screen are pre-crawled, with these commands filled in.
+
+The upload API is `apps/api/src/routes/precrawl.ts`: `POST /v1/precrawl/runs`,
+`POST /v1/precrawl/assets/missing`, `PUT /v1/precrawl/assets/:hash`,
+`PUT /v1/precrawl/runs/:id/pages`, `POST /v1/precrawl/runs/:id/finish`, and
+`GET /v1/precrawl?domain=&month=` for the panel. A month a cloud crawl is still writing is refused
+(409) until that crawl ends, since both would write the same rows.
+
 ---
 
 ## Continuous deployment
 
 **Every push to `main` deploys via GitHub Actions** — see the `deploy` job in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The order is
-`gitleaks → typecheck → build → tests → deploy`, so a commit that fails the 199-test suite never
+`gitleaks → typecheck → build → tests → deploy`, so a commit that fails the 217-test suite never
 reaches production.
 
 The deploy job needs two repository secrets, `CLOUDFLARE_API_TOKEN` and
@@ -219,7 +272,7 @@ Full runbook, including the induced-429 acceptance test and the rollback table:
 
 ```powershell
 npx --no-install pnpm turbo run typecheck   # 7 tasks, all packages
-npx --no-install pnpm turbo run test        # 199 tests: 38 crawler, 161 api
+npx --no-install pnpm turbo run test        # 217 tests: 45 crawler, 172 api
 ```
 
 `apps/api`'s tests run the **shipping module graph**: `scripts/run-api-tests.mjs` bundles each test
@@ -267,7 +320,7 @@ The first three need only `dist/`; the last two start a Vite dev server on a fre
 entry in `check:contrast`'s `CHECKS` list, or the audit will not cover it. Never use a raw Tailwind
 palette colour (`text-amber-300`) for app chrome: those are dark-theme-only values and they
 disappear against the light theme. Controls use the component classes defined in `src/index.css`
-(`cw-field`, `cw-btn`, `cw-panel`, `cw-overlay`, `cw-label`, `cw-segment`) rather than restating
+(`cw-field`, `cw-btn`, `cw-panel`, `cw-overlay`, `cw-label`, `cw-segment`, `cw-switch`) rather than restating
 five utilities at every call site.
 
 ---
@@ -295,6 +348,8 @@ the CLI enforces this.
 node src/cli.ts crawl --domain=<domain> --month=YYYY-MM [options]
 node src/cli.ts serve [--port=8787]
 node src/cli.ts stats [--domain=<domain>]
+node src/cli.ts login --api=<app url> [--email=<email>] [--token=<token>]
+node src/cli.ts publish --domain=<domain> --month=YYYY-MM [--api=<app url>]
 
 Required:
   --domain=<domain>        e.g. samsung.com
@@ -313,6 +368,8 @@ Options:
   --no-assets              HTML only
   --refresh                ignore cached CDX survey, re-query
   --verbose                debug logging
+  --publish                after the crawl, publish the month to the deployed viewer's R2
+                           (see "Pre-crawling with the local crawler" above)
 ```
 
 ---

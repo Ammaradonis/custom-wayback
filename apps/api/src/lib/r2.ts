@@ -10,6 +10,10 @@
  *  4. Assets (content-addressed) have their ref_count decremented; they are
  *     deleted from R2 only when ref_count reaches 0.
  *
+ * The exception is a pre-crawled page (`snapshots.source = 'local'`, published by the
+ * local crawler — routes/precrawl.ts): it is kept, because archive.org would not serve
+ * it to the Worker and it is the copy that exists for exactly that case.
+ *
  * The D1 row is never deleted — it is the navigation ledger.
  */
 
@@ -131,12 +135,19 @@ interface PurgeBatch {
  */
 export async function purgeStaleCachedPages(env: Env): Promise<number> {
   const cutoff = Math.floor(Date.now() / 1000) - PURGE_GRACE_SECONDS;
+  // `r2_key AS r2Key`: D1 returns column names as written, and without the alias
+  // `row.r2Key` was undefined, so the delete below removed nothing while the row was
+  // marked purged — every purged page's blob stayed in the bucket, unreferenced.
+  //
+  // A pre-crawled page (`source = 'local'`) is never purged: it is in R2 because
+  // archive.org would not serve it to the Worker, so it is the only copy the viewer has.
   const rows = await env.DB.prepare(
-    `SELECT id, r2_key, domain FROM snapshots
+    `SELECT id, r2_key AS r2Key, domain FROM snapshots
      WHERE served_at IS NOT NULL
        AND purged_at IS NULL
        AND r2_key IS NOT NULL
        AND served_at < ?
+       AND (source IS NULL OR source != 'local')
      LIMIT 200`,
   )
     .bind(cutoff)

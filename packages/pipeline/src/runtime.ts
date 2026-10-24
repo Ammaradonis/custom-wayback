@@ -762,6 +762,40 @@ export const RUNTIME_SCRIPT = String.raw`
   document.addEventListener('pointerover', function (ev) { reportIntent(ev, 90); }, true);
   document.addEventListener('touchstart', function (ev) { reportIntent(ev, 0); }, { capture: true, passive: true });
 
+  // Files archive.org refused to give the Worker (HTTP 429). A failed response is opaque
+  // to the page except for its Server-Timing entry, which the Worker sets to
+  // 'cw-throttled' for exactly this; the shell uses the count to say why the page may
+  // look broken, and to offer archive.org's own replay instead.
+  var throttled = { count: 0, styles: 0 };
+  var throttleTimer = null;
+  var reportThrottled = function () {
+    if (throttled.count > 0) report('cw:throttled', { count: throttled.count, styles: throttled.styles });
+  };
+  var noteTimings = function (entries) {
+    var found = 0;
+    for (var ti = 0; ti < entries.length; ti++) {
+      var timings = entries[ti].serverTiming || [];
+      for (var tj = 0; tj < timings.length; tj++) {
+        if (timings[tj].name !== 'cw-throttled') continue;
+        found++;
+        if (/\.css(?:[?#]|$)/i.test(entries[ti].name)) throttled.styles++;
+        break;
+      }
+    }
+    if (found === 0) return;
+    throttled.count += found;
+    // One message per burst: a throttled page fails dozens of files within a moment.
+    if (throttleTimer === null) {
+      throttleTimer = setTimeout(function () { throttleTimer = null; reportThrottled(); }, 400);
+    }
+  };
+  try {
+    if (framed && window.PerformanceObserver) {
+      new PerformanceObserver(function (list) { noteTimings(list.getEntries()); })
+        .observe({ type: 'resource', buffered: true });
+    }
+  } catch (e) { /* no resource timing here: the shell just cannot say why */ }
+
   var markReady = function () {
     if (window.__cwRuntime.ready) return;
     window.__cwRuntime.ready = true;
@@ -789,6 +823,7 @@ export const RUNTIME_SCRIPT = String.raw`
     if (data.type === 'cw:ping') report('cw:pong', { href: location.href, title: document.title || '' });
     if (data.type === 'cw:request-metadata') reportMetadata();
     if (data.type === 'cw:request-links') reportLinks();
+    if (data.type === 'cw:request-throttled') reportThrottled();
   });
 })();
 `;

@@ -178,6 +178,11 @@ export const snapshots = sqliteTable(
     servedAt: integer("served_at"),
     /** unix seconds; set once R2 content has been purged post-serve. */
     purgedAt: integer("purged_at"),
+    /**
+     * `'local'` for a page the local crawler published (`crawl-local publish`); NULL for
+     * the cloud crawl. The post-serve purge never deletes a `'local'` page (0005).
+     */
+    source: text("source"),
   },
   (t) => [
     index("snapshots_domain_day").on(t.domain, t.day),

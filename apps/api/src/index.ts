@@ -6,6 +6,7 @@
  *  GET  /v1/domains/…   — domain management
  *  POST /v1/jobs        — start a crawl;  GET /v1/jobs/:id for status
  *  GET  /v1/jobs/usage  — cost monitoring dashboard payload
+ *  …    /v1/precrawl/…  — the local crawler publishes pre-crawled pages into R2
  *  GET  /a/:domain/…    — archive viewer (fast plane); a top-level navigation gets the shell
  *  GET  /_cw/r/…        — archived resources for on-demand pages
  *  POST /_cw/warm       — prepare likely next pages at the edge
@@ -39,6 +40,7 @@ import {
   viewerRouter,
 } from "./routes/viewer.js";
 import { manifestRouter } from "./routes/manifest.js";
+import { precrawlRouter } from "./routes/precrawl.js";
 import { searchRouter } from "./routes/search.js";
 import { sharesRouter } from "./routes/shares.js";
 import { compareRouter } from "./routes/compare.js";
@@ -234,6 +236,7 @@ app.route("/v1/shares", sharesRouter);
 app.route("/v1/compare", compareRouter);
 app.route("/v1/export", exportRouter);
 app.route("/v1/backup", backupRouter);
+app.route("/v1/precrawl", precrawlRouter);
 app.route("/v1", manifestRouter);
 app.route("/a", viewerRouter);
 
