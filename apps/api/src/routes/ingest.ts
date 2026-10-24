@@ -333,7 +333,12 @@ ingestRouter.get("/:ingestId/events", async (c) => {
     });
 
     if (["ready", "partial", "failed"].includes(current.status)) {
-      send({ type: "done", ingestId, status: current.status });
+      send({
+        type: "done",
+        ingestId,
+        status: current.status,
+        errorMessage: current.error_message,
+      });
       done = true;
       clearInterval(interval);
       await writer.close();

@@ -104,6 +104,7 @@ interface DomainRowProps {
   onRemove: (domainId: string) => void;
   onShare: (target: ShareTarget) => void;
   isCrawling: boolean;
+  crawlBlocked: boolean;
   navigate: (path: string) => void;
 }
 
@@ -115,6 +116,7 @@ function DomainRow({
   onRemove,
   onShare,
   isCrawling,
+  crawlBlocked,
   navigate,
 }: DomainRowProps) {
   const { coverageYear, coverageMonth, selectedDay } = rowState;
@@ -225,10 +227,10 @@ function DomainRow({
         <button
           type="button"
           onClick={() => onStartCrawl(entry.id, selectedMonth)}
-          disabled={isCrawling}
+          disabled={isCrawling || crawlBlocked}
           className="cw-btn cw-btn-primary"
         >
-          {isCrawling ? "Crawling…" : "Crawl month"}
+          {isCrawling ? "Crawling…" : crawlBlocked ? "Wait for current crawl" : "Crawl month"}
         </button>
 
         {/*
@@ -383,10 +385,9 @@ function CrawlProgress({
   const assetsDone = job.assetsDone ?? 0;
   const terminal = isTerminalJob(job.status);
   const stage = job.stage ?? "survey";
-  const pagesComplete = !terminal && ["assets", "finalize", "done"].includes(stage)
-    ? true
-    : job.status === "ready" || job.status === "partial";
-  const assetsComplete = job.status === "ready" || job.status === "partial" || ["finalize", "done"].includes(stage);
+  const successful = job.status === "ready" || job.status === "partial";
+  const pagesComplete = successful || (!terminal && ["assets", "finalize", "done"].includes(stage));
+  const assetsComplete = successful || (!terminal && ["finalize", "done"].includes(stage));
   const pagesActive = !terminal && !pagesComplete;
   const assetsActive = !terminal && !assetsComplete && (stage === "assets" || assetsTotal > 0);
 
@@ -520,6 +521,11 @@ export default function DashboardPage() {
   const startCrawl = useMutation({
     mutationFn: ({ domainId, month }: { domainId: string; month: string }) =>
       ingest.start(domainId, month),
+    onMutate: () => {
+      setCrawlStartError(null);
+      setJobProgress(null);
+      setProgressError(null);
+    },
     onSuccess: (data, vars) => {
       setActiveJobId(data.id);
       setActiveJobDomainId(vars.domainId);
@@ -551,6 +557,8 @@ export default function DashboardPage() {
     let stopped = false;
     let fallbackStarted = false;
     let pollTimer: number | undefined;
+    let staleTimer: number | undefined;
+    let lastStreamActivity = Date.now();
     let stopWatching: () => void = () => {};
 
     const finish = (status: string, errorMessage?: string | null) => {
@@ -606,9 +614,19 @@ export default function DashboardPage() {
       if (!stopped) pollTimer = window.setTimeout(() => void pollStatus(), 5000);
     };
 
+    const startFallback = (error: Error) => {
+      if (stopped || fallbackStarted) return;
+      fallbackStarted = true;
+      setProgressConnection("polling");
+      setProgressError(error.message);
+      stopWatching();
+      void pollStatus();
+    };
+
     stopWatching = watchIngest(
       activeJobId,
       (event) => {
+        lastStreamActivity = Date.now();
         if (event.type === "open") {
           setProgressConnection("live");
           setProgressError(null);
@@ -623,20 +641,19 @@ export default function DashboardPage() {
         }
         if (event.type === "done") finish(event.status ?? "failed", event.errorMessage);
       },
-      (error) => {
-        if (stopped || fallbackStarted) return;
-        fallbackStarted = true;
-        setProgressConnection("polling");
-        setProgressError(error.message);
-        stopWatching();
-        void pollStatus();
-      },
+      startFallback,
     );
+    staleTimer = window.setInterval(() => {
+      if (!fallbackStarted && Date.now() - lastStreamActivity > 10_000) {
+        startFallback(new Error("No crawl update arrived for 10 seconds."));
+      }
+    }, 3000);
 
     return () => {
       stopped = true;
       stopWatching();
       if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+      if (staleTimer !== undefined) window.clearInterval(staleTimer);
     };
   }, [activeJobId, activeJobDomainId, qc]);
 
@@ -767,6 +784,7 @@ export default function DashboardPage() {
                   (startCrawl.isPending || activeJobId !== null) &&
                   activeJobDomainId === d.id
                 }
+                crawlBlocked={startCrawl.isPending || activeJobId !== null}
                 navigate={navigate}
               />
             ))}
@@ -774,6 +792,24 @@ export default function DashboardPage() {
         </section>
 
         {/* ── Active job progress ── */}
+        {startCrawl.isPending && (
+          <section className="cw-panel space-y-3 p-4">
+            <h2 className="text-sm font-semibold">Starting crawl…</h2>
+            <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
+              Creating the crawl job.
+            </p>
+            <div
+              className="cw-progress-track"
+              role="progressbar"
+              aria-label="Starting crawl progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuetext="Creating crawl job"
+            >
+              <div className="cw-progress-fill cw-progress-fill-indeterminate" />
+            </div>
+          </section>
+        )}
         {jobProgress && (
           <section className="cw-panel space-y-3 p-4">
             <div className="flex items-center justify-between gap-3">
