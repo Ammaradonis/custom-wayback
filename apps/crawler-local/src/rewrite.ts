@@ -304,8 +304,9 @@ export function rewritePage(html: string, ctx: RewriteContext): RewriteResult {
     strippedNodes += 1;
   }
   for (const el of document.querySelectorAll('meta[http-equiv]')) {
-    if ((el.getAttribute('http-equiv') ?? '').toLowerCase() === 'refresh') {
-      el.remove(); // a meta refresh would yank the user out of the mirror
+    const directive = (el.getAttribute('http-equiv') ?? '').trim().toLowerCase();
+    if (['refresh', 'content-security-policy', 'content-security-policy-report-only'].includes(directive)) {
+      el.remove(); // upstream navigation and CSP rules must not override the mirror
       strippedNodes += 1;
     }
   }

@@ -792,6 +792,7 @@ async function runPages(
         domain: msg.domain,
         day: page.day,
         pageUrl: page.url,
+        ts: page.ts,
         assetMap,
         linkMap,
       });

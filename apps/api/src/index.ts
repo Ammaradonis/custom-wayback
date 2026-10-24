@@ -43,7 +43,34 @@ import type { Env } from "./env.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
+function setArchiveResourceHeaders(headers: Headers, origin: string | undefined): void {
+  headers.set("Cross-Origin-Resource-Policy", "cross-origin");
+  // The viewer iframe has an opaque origin (`null`). Allow that isolated frame to
+  // read archived assets, while avoiding a wildcard CORS grant to unrelated sites.
+  if (origin === "null") headers.set("Access-Control-Allow-Origin", "null");
+  else headers.delete("Access-Control-Allow-Origin");
+  const vary = (headers.get("Vary") ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!vary.some((value) => value.toLowerCase() === "origin")) vary.push("Origin");
+  headers.set("Vary", vary.join(", "));
+}
+
 // ── Global middleware ─────────────────────────────────────────────────────────
+
+// The archived page lives in an opaque-origin iframe. CORP's normal same-origin
+// default would block its font and other no-cors asset requests, so opt only the
+// two public archive-asset routes into cross-origin resource loading. This middleware
+// wraps secureHeaders so its route-specific value is the final response header.
+app.use("/assets/*", async (c, next) => {
+  await next();
+  setArchiveResourceHeaders(c.res.headers, c.req.header("Origin"));
+});
+app.use("/_cw/resource", async (c, next) => {
+  await next();
+  setArchiveResourceHeaders(c.res.headers, c.req.header("Origin"));
+});
 
 app.use("*", logger());
 
@@ -262,6 +289,9 @@ app.get("/assets/:prefix/:hash", async (c) => {
   object.writeHttpMetadata(headers);
   headers.set("Cache-Control", "public, max-age=31536000, immutable");
   headers.set("X-Content-Type-Options", "nosniff");
+  // The archived page runs in an opaque sandbox origin. Fonts and other CORS-mode
+  // resources therefore need an anonymous wildcard response from this public route.
+  headers.set("Access-Control-Allow-Origin", "*");
   headers.set("ETag", object.httpEtag);
   if ((headers.get("Content-Type") ?? "").toLowerCase().startsWith("image/svg+xml")) {
     headers.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox");
@@ -273,6 +303,17 @@ app.get("/assets/:prefix/:hash", async (c) => {
 
 // Cold captures are rewritten to this same-origin route so the page's strict CSP
 // can allow archived resources without letting the browser contact live hosts.
+app.options("/_cw/resource", () =>
+  new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+      "Access-Control-Allow-Headers": "*",
+      "Access-Control-Max-Age": "86400",
+    },
+  }),
+);
 app.get("/_cw/resource", (c) =>
   fetchOnDemandResource(c.req.query("ts") ?? "", c.req.query("url") ?? "", c.env, c.executionCtx),
 );

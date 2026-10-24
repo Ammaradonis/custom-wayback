@@ -40,7 +40,7 @@ const ShareDialog = lazy(() =>
 
 interface CwMessage {
   __cw: true;
-  type: "cw:dead-request" | "cw:error" | "cw:navigate" | "cw:links";
+  type: "cw:dead-request" | "cw:error" | "cw:navigate" | "cw:links" | "cw:ready";
   detail?: unknown;
 }
 
@@ -91,6 +91,8 @@ export default function ViewerPage() {
   const navigate = useNavigate();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const dayStripRef = useRef<HTMLDivElement>(null);
+  const loadingFallbackRef = useRef<number | null>(null);
+  const runtimeReadyRef = useRef(false);
 
   const [currentRoute, setCurrentRoute] = useState(`/a/${domain}/${day}/${wildcard}`);
   const [navStack, setNavStack] = useState<string[]>([`/a/${domain}/${day}/${wildcard}`]);
@@ -115,6 +117,11 @@ export default function ViewerPage() {
       return [...s, route];
     });
     setLoading(true);
+    runtimeReadyRef.current = false;
+    if (loadingFallbackRef.current !== null) {
+      window.clearTimeout(loadingFallbackRef.current);
+      loadingFallbackRef.current = null;
+    }
     setViewerError(null);
     // Fetch toolbar headers for the new route so the resolved-day badge and
     // source indicator update correctly. This is a HEAD request — no body, cheap.
@@ -133,6 +140,12 @@ export default function ViewerPage() {
     }).catch(() => {
       setViewerError("Could not reach the archive viewer. Check your connection and try again.");
     });
+    return () => {
+      if (loadingFallbackRef.current !== null) {
+        window.clearTimeout(loadingFallbackRef.current);
+        loadingFallbackRef.current = null;
+      }
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [domain, day, wildcard]);
 
@@ -155,6 +168,7 @@ export default function ViewerPage() {
   // postMessage bridge from iframe.
   useEffect(() => {
     function onMessage(e: MessageEvent) {
+      if (e.source !== iframeRef.current?.contentWindow) return;
       if (!e.data || (e.data as CwMessage).__cw !== true) return;
       const msg = e.data as CwMessage;
       if (msg.type === "cw:dead-request") {
@@ -163,9 +177,16 @@ export default function ViewerPage() {
           if (next === 1 || next % 10 === 0) showToast(`${next} blocked/dead requests silenced`);
           return next;
         });
+      } else if (msg.type === "cw:ready") {
+        runtimeReadyRef.current = true;
+        if (loadingFallbackRef.current !== null) {
+          window.clearTimeout(loadingFallbackRef.current);
+          loadingFallbackRef.current = null;
+        }
+        setLoading(false);
       } else if (msg.type === "cw:navigate") {
         const url = (msg.detail as { url?: string })?.url;
-        if (url && url.startsWith("/a/")) {
+        if (url && url.startsWith(`/a/${domain}/`)) {
           // navigate() keeps React Router in sync; goRoute updates our local
           // state (nav stack, loading flag).
           const m = /^\/a\/[^/]+\/(\d{4}-\d{2}-\d{2})/.exec(url);
@@ -225,6 +246,11 @@ export default function ViewerPage() {
   function handleReload() {
     setViewerError(null);
     setLoading(true);
+    runtimeReadyRef.current = false;
+    if (loadingFallbackRef.current !== null) {
+      window.clearTimeout(loadingFallbackRef.current);
+      loadingFallbackRef.current = null;
+    }
     if (iframeRef.current) iframeRef.current.src = currentRoute;
   }
 
@@ -518,7 +544,13 @@ export default function ViewerPage() {
               sandbox="allow-scripts allow-forms allow-popups"
               className="absolute inset-0 w-full h-full border-0 bg-white"
               onLoad={() => {
-                setLoading(false);
+                if (!runtimeReadyRef.current) {
+                  if (loadingFallbackRef.current !== null) window.clearTimeout(loadingFallbackRef.current);
+                  loadingFallbackRef.current = window.setTimeout(() => {
+                    loadingFallbackRef.current = null;
+                    setLoading(false);
+                  }, 1200);
+                }
                 // The iframe is sandboxed without allow-same-origin, so
                 // contentDocument is always null. Link interception and prefetch are
                 // handled by the runtime script injected at ingest/on-demand time,

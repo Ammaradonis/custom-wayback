@@ -89,6 +89,28 @@ export function snapshotCsp(extra?: string): string {
   return addition ? `${SNAPSHOT_CSP}; ${addition}` : SNAPSHOT_CSP;
 }
 
+/**
+ * CSP for a page displayed in the viewer's sandboxed iframe.
+ *
+ * The iframe deliberately has no `allow-same-origin`, so browsers give the
+ * archived document an opaque origin. `'self'` alone then cannot match this
+ * application's asset routes. Add only the viewer's own origin to the resource
+ * directives; this keeps the iframe isolated while allowing its mirrored CSS,
+ * scripts, images and fonts to load.
+ */
+export function snapshotCspForOrigin(origin: string): string {
+  try {
+    const url = new URL(origin);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
+      return SNAPSHOT_CSP;
+    }
+    const resources = SNAPSHOT_CSP.replace(/'self'/g, `'self' ${url.origin}`);
+    return `${resources}; connect-src ${url.origin}/_cw/resource`;
+  } catch {
+    return SNAPSHOT_CSP;
+  }
+}
+
 // ── The contract, as data ────────────────────────────────────────────────────
 
 /**

@@ -18,8 +18,17 @@ import {
   isForeignBase,
   isNavigablePage,
   isStrippedMeta,
+  canonicalize,
+  sameSite,
+  snapshotPath,
   scriptDisposition,
   snapshotCsp,
+  snapshotCspForOrigin,
+  metaTagsHtml,
+  RUNTIME_CSS,
+  RUNTIME_SCRIPT,
+  RUNTIME_SCRIPT_ID,
+  RUNTIME_STYLE_ID,
   stubScriptHtml,
 } from "@custom-wayback/pipeline";
 import type { Env } from "../env.js";
@@ -35,6 +44,7 @@ export const viewerRouter = new Hono<{ Bindings: Env }>();
 interface SnapshotRow {
   id: string;
   r2_key: string | null;
+  url: string | null;
   ts: string;
   resolved_day: string | null;
   delta_days: number | null;
@@ -74,7 +84,7 @@ async function findSnapshot(
   pageId: string,
 ): Promise<SnapshotRow | null> {
   const byRoute = await env.DB.prepare(
-    `SELECT id, r2_key, ts, resolved_day, delta_days, purged_at, served_at
+    `SELECT id, r2_key, url, ts, resolved_day, delta_days, purged_at, served_at
      FROM snapshots
      WHERE domain = ? AND day = ? AND page_id = ?
      ORDER BY (mime LIKE 'text/html%') DESC, ts ASC
@@ -87,7 +97,7 @@ async function findSnapshot(
   // Legacy rows: `page_id` was added by a later migration, so an older crawl's rows
   // have it NULL and are only addressable by URL.
   return env.DB.prepare(
-    `SELECT id, r2_key, ts, resolved_day, delta_days, purged_at, served_at
+    `SELECT id, r2_key, url, ts, resolved_day, delta_days, purged_at, served_at
      FROM snapshots
      WHERE domain = ? AND day = ? AND page_id IS NULL AND url LIKE ?
      ORDER BY (mime LIKE 'text/html%') DESC, ts ASC
@@ -198,13 +208,23 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
   // throttles. In practice the viewer answered 404 for pages the Internet Archive would
   // happily have served, which is the "View shows nothing" report.
   //
-  // So: resolve the closest capture with one availability request and serve it. The
+  // So: resolve the closest capture across host/scheme aliases and serve that exact URL. The
   // crawl goes back to being an optimisation — warm pages from R2, cold ones from the
   // archive — instead of a gate in front of the product.
   if (!snap) {
-    const onDemandTs = await resolveOnDemandCapture(c.env, domain, day, path);
-    if (onDemandTs) {
-      return fetchOnDemand(domain, day, path, onDemandTs, c.env, null, 0);
+    const capture = await resolveOnDemandCapture(c.env, domain, day, path);
+    if (capture) {
+      return fetchOnDemand(
+        domain,
+        day,
+        path,
+        capture.ts,
+        c.env,
+        null,
+        0,
+        capture.url,
+        new URL(c.req.url).origin,
+      );
     }
   }
 
@@ -280,7 +300,17 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
 
   // 3. If content already purged, do an on-demand id_ fetch.
   if (snap.purged_at !== null || !snap.r2_key) {
-    return fetchOnDemand(domain, day, path, snap.ts, c.env, snap.resolved_day, snap.delta_days);
+    return fetchOnDemand(
+      domain,
+      day,
+      path,
+      snap.ts,
+      c.env,
+      snap.resolved_day,
+      snap.delta_days,
+      snap.url ?? undefined,
+      new URL(c.req.url).origin,
+    );
   }
 
   // 4. Try Workers Cache API → R2.
@@ -294,55 +324,119 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
     // policy here matters: without it the R2 path served archived pages with no
     // content policy at all, while the on-demand path had one — the same URL
     // getting a different security posture depending on which path served it.
-    response.headers.set("Content-Security-Policy", snapshotCsp());
-    injectToolbarHeaders(response, snap.resolved_day, snap.delta_days);
-    return response;
+    const page = prepareCachedSnapshot(response, snap.ts, day, snap.url ?? `https://${domain}${path}`);
+    page.headers.set("Content-Security-Policy", snapshotCspForOrigin(new URL(c.req.url).origin));
+    injectToolbarHeaders(page, snap.resolved_day, snap.delta_days);
+    return page;
   }
 
   // 5. Full cache miss — on-demand fetch.
-  return fetchOnDemand(domain, day, path, snap.ts, c.env, snap.resolved_day, snap.delta_days);
+  return fetchOnDemand(
+    domain,
+    day,
+    path,
+    snap.ts,
+    c.env,
+    snap.resolved_day,
+    snap.delta_days,
+    snap.url ?? undefined,
+    new URL(c.req.url).origin,
+  );
 });
 
+/** Refresh embedded runtime/CSP metadata on cached HTML so existing R2 captures get current replay fixes. */
+function prepareCachedSnapshot(response: Response, ts: string, day: string, url: string): Response {
+  if (!(response.headers.get("Content-Type") ?? "").toLowerCase().startsWith("text/html")) return response;
+
+  const mirrorContent = JSON.stringify({ day, url, ts, resourceProxy: true });
+  const runtimeMarkup = `<style id="${RUNTIME_STYLE_ID}">${RUNTIME_CSS}</style><script id="${RUNTIME_SCRIPT_ID}">${RUNTIME_SCRIPT}</script>`;
+  let headSeen = false;
+  const rewritten = new HTMLRewriter()
+    .on("head", {
+      element(el) {
+        if (headSeen) return;
+        headSeen = true;
+        el.prepend(`${metaTagsHtml({ "cw-mirror": mirrorContent })}${runtimeMarkup}`, { html: true });
+      },
+    })
+    .on(`script#${RUNTIME_SCRIPT_ID}`, { element(el) { el.remove(); } })
+    .on(`style#${RUNTIME_STYLE_ID}`, {
+      element(el) { el.remove(); },
+    })
+    .on("meta", {
+      element(el) {
+        const equiv = (el.getAttribute("http-equiv") ?? "").trim().toLowerCase();
+        if (equiv === "content-security-policy" || equiv === "content-security-policy-report-only") {
+          el.remove();
+          return;
+        }
+        if ((el.getAttribute("name") ?? "").trim().toLowerCase() === "cw-mirror") el.remove();
+      },
+    })
+    .transform(response);
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Length");
+  headers.delete("Content-Encoding");
+  headers.set("Cache-Control", "no-store");
+  return new Response(rewritten.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 /**
- * The closest capture of one page enough to serve it on demand, or null.
+ * The closest capture and the exact host/scheme that owns it, or null.
  *
- * One availability request per (page, day), cached in KV: the answer is immutable
- * history, so a repeat visit costs nothing and the viewer never re-probes a URL it has
- * already asked about. A negative result is cached for a day, because "this page was
- * never captured" is true until a new crawl says otherwise, but a re-crawl should not be
- * blocked by a stale "no" for a week.
+ * The selected host and timestamp are cached in KV: repeat visits do not lose whether
+ * the capture was filed under `www` or the bare host. A negative result is cached for
+ * one day so a new crawl can clear it quickly.
  */
+interface OnDemandCapture {
+  ts: string;
+  url: string;
+}
+
 async function resolveOnDemandCapture(
   env: Env,
   domain: string,
   day: string,
   path: string,
-): Promise<string | null> {
+): Promise<OnDemandCapture | null> {
   const stamp = day.replace(/-/g, "");
   if (!/^\d{8}$/.test(stamp)) return null;
 
-  const key = `capture:${domain}${path}:${day}`;
+  const key = `capture:v2:${domain}${path}:${day}`;
   try {
     const cached = await env.COVERAGE_KV.get(key, "text");
-    if (cached) return cached === "-" ? null : cached;
+    if (cached) {
+      if (cached === "-") return null;
+      const parsed = JSON.parse(cached) as Partial<OnDemandCapture>;
+      if (/^\d{14}$/.test(parsed.ts ?? "") && typeof parsed.url === "string") {
+        const url = new URL(parsed.url);
+        if (url.protocol === "http:" || url.protocol === "https:") return { ts: parsed.ts!, url: url.href };
+      }
+    }
   } catch {
     // KV is a cache; a miss or an error both mean "ask archive.org".
   }
 
   /**
-   * Try the bare host, then the `www.` form.
+   * Try the requested host, then its `www.`/bare alias and HTTP form.
    *
    * The archive indexes captures under whatever host the page was crawled from, and the
    * two are not interchangeable: `https://university.com/` has **no capture at all**
    * (the availability API answers `{}`), while `https://www.university.com/` has one the
    * same week. Without the second probe the viewer answers 404 for a site that is
    * captured — the exact "nothing renders" symptom — so a miss on the bare host is worth
-   * one more request.
+   * another request. The exact URL returned by availability travels with the timestamp,
+   * or the viewer can replay a different host's page.
    */
-  const targets = [`https://${domain}${path}`];
-  if (!domain.startsWith("www.")) targets.push(`https://www.${domain}${path}`);
+  const primary = domain.replace(/^www\./i, "");
+  const hosts = domain.toLowerCase().startsWith("www.") ? [domain, primary] : [domain, `www.${domain}`];
+  const targets = [...new Set(hosts.flatMap((host) => [`https://${host}${path}`, `http://${host}${path}`]))];
 
-  let ts: string | null = null;
+  let capture: OnDemandCapture | null = null;
   for (const target of targets) {
     const probe = `${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(target)}&timestamp=${stamp}`;
     try {
@@ -356,7 +450,7 @@ async function resolveOnDemandCapture(
       const closest = body.archived_snapshots?.closest;
       // A capture of an error page is not a page worth serving.
       if (closest?.available && closest.status === "200" && /^\d{14}$/.test(closest.timestamp ?? "")) {
-        ts = closest.timestamp ?? null;
+        capture = { ts: closest.timestamp!, url: target };
         break;
       }
     } catch {
@@ -365,13 +459,13 @@ async function resolveOnDemandCapture(
   }
 
   try {
-    await env.COVERAGE_KV.put(key, ts ?? "-", {
-      expirationTtl: ts ? 60 * 60 * 24 * 7 : 60 * 60 * 24,
+    await env.COVERAGE_KV.put(key, capture ? JSON.stringify(capture) : "-", {
+      expirationTtl: capture ? 60 * 60 * 24 * 7 : 60 * 60 * 24,
     });
   } catch {
     // Losing the cache entry only costs one extra probe next time.
   }
-  return ts;
+  return capture;
 }
 
 // ── On-demand id_ fetch ───────────────────────────────────────────────────────
@@ -438,9 +532,23 @@ export async function fetchOnDemand(
   env: Env,
   resolvedDay?: string | null,
   deltaDays?: number | null,
+  sourceUrl?: string,
+  resourceOrigin?: string,
 ): Promise<Response> {
-  const originalUrl = `https://${domain}${path}`;
+  const fallbackUrl = `https://${domain}${path}`;
+  let originalUrl = fallbackUrl;
+  if (sourceUrl) {
+    try {
+      const candidate = new URL(sourceUrl);
+      if ((candidate.protocol === "http:" || candidate.protocol === "https:") && !candidate.username && !candidate.password) {
+        originalUrl = candidate.href;
+      }
+    } catch {
+      // A bad ledger URL falls back to the route's host and path.
+    }
+  }
   const rawUrl = `${WAYBACK_RAW_BASE}/${ts}id_/${originalUrl}`;
+  const pageCsp = resourceOrigin ? snapshotCspForOrigin(resourceOrigin) : snapshotCsp();
 
   const upstream = await fetch(rawUrl, {
     headers: { "User-Agent": env.CRAWLER_USER_AGENT },
@@ -454,12 +562,15 @@ export async function fetchOnDemand(
 
   const injection = headInjection({
     baseHref: `/a/${domain}/${day}/`,
+    csp: pageCsp,
     // The runtime reads this for the toolbar bridge ("you are looking at the
     // on-demand rendition of X"). Its flag counts stay at the runtime's zero
     // defaults: `HTMLRewriter` streams, so this meta is emitted before the scripts
     // that would be counted have been seen, and a partial count would be worse than
     // none. The stub markers themselves are the record of what was stubbed.
-    metas: { "cw-mirror": JSON.stringify({ day, url: originalUrl, source: "on-demand" }) },
+    metas: {
+      "cw-mirror": JSON.stringify({ day, url: originalUrl, ts, source: "on-demand", resourceProxy: true }),
+    },
   });
 
   // Set when the head contract has been injected, so the no-head fallback below
@@ -484,7 +595,12 @@ export async function fetchOnDemand(
     //    intent is on the response instead.
     .on("meta", {
       element(el) {
-        if (isStrippedMeta(el.getAttribute("http-equiv"), el.getAttribute("name"))) {
+        const httpEquiv = (el.getAttribute("http-equiv") ?? "").trim().toLowerCase();
+        if (
+          isStrippedMeta(httpEquiv, el.getAttribute("name")) ||
+          httpEquiv === "content-security-policy" ||
+          httpEquiv === "content-security-policy-report-only"
+        ) {
           el.remove();
         }
       },
@@ -563,6 +679,35 @@ export async function fetchOnDemand(
         if (href) el.setAttribute("href", onDemandResourceUrl(href, originalUrl, ts, resourceBudget));
       },
     })
+    .on("a[href]", {
+      element(el) {
+        const href = el.getAttribute("href");
+        if (!href || href.trim().startsWith("#")) return;
+        let resolved: URL;
+        try {
+          resolved = new URL(href, originalUrl);
+        } catch {
+          return;
+        }
+        const canonical = canonicalize(resolved.href);
+        if (!canonical) return;
+
+        if (sameSite(canonical, originalUrl)) {
+          const suffix = resolved.hash;
+          if (isNavigablePage(canonical)) {
+            el.setAttribute("href", `${snapshotPath(domain, day, canonical)}${suffix}`);
+          } else {
+            el.setAttribute("href", onDemandResourceUrl(canonical, originalUrl, ts, resourceBudget));
+          }
+          return;
+        }
+
+        el.setAttribute("href", canonical);
+        el.setAttribute("rel", "noopener noreferrer nofollow");
+        el.setAttribute("target", "_blank");
+        el.setAttribute("data-cw-external", "1");
+      },
+    })
     .on("[style]", {
       element(el) {
         const style = el.getAttribute("style");
@@ -607,7 +752,7 @@ export async function fetchOnDemand(
     // and the one that survives anything the page does to its own `<head>`; serving the
     // two planes with different strengths meant a page's security posture depended on
     // whether it happened to be cached.
-    "Content-Security-Policy": snapshotCsp(),
+    "Content-Security-Policy": pageCsp,
     // The reconstructed HTML is not frozen in a browser cache. Resource bytes are
     // cached separately; re-ingest can update this page without a stale rendition
     // lingering in a browser or CDN cache after `purged_at` is cleared.
@@ -754,19 +899,37 @@ export async function fetchOnDemandResource(
   }
 
   const upstreamType = upstream.headers.get("Content-Type") ?? "application/octet-stream";
-  const isCss = /^text\/css(?:\s*;|$)/i.test(upstreamType) || /\.css$/i.test(target.pathname);
+  const isHtml = /^text\/html(?:\s*;|$)/i.test(upstreamType);
+  const isCss = !isHtml && (/^text\/css(?:\s*;|$)/i.test(upstreamType) || /\.css$/i.test(target.pathname));
   let body: BodyInit | null = upstream.body;
   let contentType = upstreamType;
   if (isCss) {
     const css = await upstream.text();
     body = rewriteOnDemandCss(css, target.href, ts, new Set<string>());
     contentType = "text/css; charset=utf-8";
+  } else if (/^(?:application\/octet-stream|binary\/octet-stream|application\/x-download|text\/plain)(?:\s*;|$)/i.test(upstreamType)) {
+    const extension = target.pathname.split(".").pop()?.toLowerCase() ?? "";
+    const knownTypes: Record<string, string> = {
+      js: "text/javascript; charset=utf-8",
+      mjs: "text/javascript; charset=utf-8",
+      cjs: "text/javascript; charset=utf-8",
+      svg: "image/svg+xml",
+      woff: "font/woff",
+      woff2: "font/woff2",
+      ttf: "font/ttf",
+      otf: "font/otf",
+      eot: "application/vnd.ms-fontobject",
+      wasm: "application/wasm",
+      json: "application/json; charset=utf-8",
+    };
+    contentType = knownTypes[extension] ?? upstreamType;
   }
 
   const headers = new Headers({
     "Content-Type": contentType,
     "Cache-Control": "public, max-age=604800, s-maxage=31536000, immutable",
     "X-Content-Type-Options": "nosniff",
+    "Access-Control-Allow-Origin": "*",
     "X-Custom-Wayback-Source": "on-demand-resource",
   });
   const response = new Response(body, { status: 200, headers });

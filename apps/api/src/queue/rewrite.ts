@@ -276,6 +276,8 @@ export interface RewriteContext {
   domain: string;
   day: string;
   pageUrl: string;
+  /** Capture timestamp for read-only dynamic requests made by archived scripts. */
+  ts?: string;
   /** original asset URL → our content-addressed route. */
   assetMap: Map<string, string>;
   /** original page URL → the day we can actually serve it for. */
@@ -310,7 +312,8 @@ export function rewriteHtml(document: Doc, ctx: RewriteContext): PageRewriteResu
   // ---- head hygiene -------------------------------------------------------
   for (const el of Array.from(document.querySelectorAll("base"))) el.remove();
   for (const el of Array.from(document.querySelectorAll("meta[http-equiv]"))) {
-    if ((el.getAttribute("http-equiv") ?? "").toLowerCase() === "refresh") el.remove();
+    const directive = (el.getAttribute("http-equiv") ?? "").trim().toLowerCase();
+    if (["refresh", "content-security-policy", "content-security-policy-report-only"].includes(directive)) el.remove();
   }
   for (const el of Array.from(document.querySelectorAll('meta[name="robots"]'))) el.remove();
 
@@ -341,7 +344,14 @@ export function rewriteHtml(document: Doc, ctx: RewriteContext): PageRewriteResu
 
     const meta = document.createElement("meta");
     meta.setAttribute("name", "cw-mirror");
-    meta.setAttribute("content", JSON.stringify({ day: ctx.day, url: ctx.pageUrl }));
+    meta.setAttribute(
+      "content",
+      JSON.stringify({
+        day: ctx.day,
+        url: ctx.pageUrl,
+        ...(ctx.ts ? { ts: ctx.ts, resourceProxy: true } : {}),
+      }),
+    );
     head.appendChild(meta);
 
     // Runtime goes in first so the shims exist before any archived script runs.
