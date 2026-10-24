@@ -39,6 +39,31 @@ type HonoCtx = Context<{ Bindings: Env }>;
 
 export const viewerRouter = new Hono<{ Bindings: Env }>();
 
+function viewerFailure(status: number, title: string, message: string): Response {
+  const escapeHtml = (value: string) =>
+    value.replace(/[&<>"']/g, (character) => {
+      const entities: Record<string, string> = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      };
+      return entities[character] ?? character;
+    });
+  const detail = JSON.stringify({ status, message }).replace(/</g, "\\u003c");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main><script>var detail=${detail};function reportFailure(){window.parent.postMessage({__cw:true,type:'cw:failure',detail:detail},'*')}window.addEventListener('message',function(event){if(event.data&&event.data.__cw===true&&event.data.type==='cw:request-failure')reportFailure()});reportFailure()</script></body></html>`;
+  return new Response(html, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; base-uri 'none'",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
 // ── Serve archived page ───────────────────────────────────────────────────────
 
 interface SnapshotRow {
@@ -289,12 +314,10 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
 
     // The one honest 404 left. It says what was asked for and what to do next rather
     // than leaving a bare wall (§2.3 "errors are designed").
-    return new Response(
-      `No capture of https://${domain}${path} on ${day} was found, and this month has no ` +
-        `HTML capture to fall back to. Start (or re-run) the crawl for this month: a month ` +
-        `whose ledger holds only images means the CDX survey returned assets instead of ` +
-        `pages, which the current crawler no longer does.\n`,
-      { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+    return viewerFailure(
+      404,
+      "No archived page was found",
+      `No capture of https://${domain}${path} on ${day} was found, and this month has no HTML capture to fall back to. Start or re-run the crawl for this month.`,
     );
   }
 
@@ -324,7 +347,15 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
     // policy here matters: without it the R2 path served archived pages with no
     // content policy at all, while the on-demand path had one — the same URL
     // getting a different security posture depending on which path served it.
-    const page = prepareCachedSnapshot(response, snap.ts, domain, day, snap.url ?? `https://${domain}${path}`);
+    const page = prepareCachedSnapshot(
+      response,
+      snap.ts,
+      domain,
+      day,
+      snap.url ?? `https://${domain}${path}`,
+      snap.resolved_day,
+      snap.delta_days,
+    );
     page.headers.set("Content-Security-Policy", snapshotCspForOrigin(new URL(c.req.url).origin));
     injectToolbarHeaders(page, snap.resolved_day, snap.delta_days);
     return page;
@@ -345,10 +376,26 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
 });
 
 /** Refresh embedded runtime/CSP metadata on cached HTML so existing R2 captures get current replay fixes. */
-function prepareCachedSnapshot(response: Response, ts: string, domain: string, day: string, url: string): Response {
+function prepareCachedSnapshot(
+  response: Response,
+  ts: string,
+  domain: string,
+  day: string,
+  url: string,
+  resolvedDay?: string | null,
+  deltaDays?: number | null,
+): Response {
   if (!(response.headers.get("Content-Type") ?? "").toLowerCase().startsWith("text/html")) return response;
 
-  const mirrorContent = JSON.stringify({ day, url, ts, resourceProxy: true });
+  const mirrorContent = JSON.stringify({
+    day,
+    url,
+    ts,
+    source: "r2",
+    resolvedDay: resolvedDay ?? day,
+    deltaDays: deltaDays ?? 0,
+    resourceProxy: true,
+  });
   const runtimeMarkup = `<style id="${RUNTIME_STYLE_ID}">${RUNTIME_CSS}</style><script id="${RUNTIME_SCRIPT_ID}">${RUNTIME_SCRIPT}</script>`;
   let headSeen = false;
   const rewritten = new HTMLRewriter()
@@ -471,16 +518,14 @@ async function resolveOnDemandCapture(
    */
   const primary = domain.replace(/^www\./i, "");
   const hosts = domain.toLowerCase().startsWith("www.") ? [domain, primary] : [domain, `www.${domain}`];
-  const targets = [
-    ...new Set(hosts.flatMap((host) => [urlForSnapshotRoute(host, path), urlForSnapshotRoute(host, path, "http:")])),
-  ];
+  const httpsTargets = [...new Set(hosts.map((host) => urlForSnapshotRoute(host, path)))];
+  const httpTargets = [...new Set(hosts.map((host) => urlForSnapshotRoute(host, path, "http:")))];
 
-  let capture: OnDemandCapture | null = null;
-  for (const target of targets) {
-    const probe = `${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(target)}&timestamp=${stamp}`;
+  const probe = async (target: string): Promise<OnDemandCapture | null> => {
+    const url = `${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(target)}&timestamp=${stamp}`;
     try {
-      const res = await fetch(probe, { headers: { "User-Agent": env.CRAWLER_USER_AGENT } });
-      if (!res.ok) continue;
+      const res = await fetch(url, { headers: { "User-Agent": env.CRAWLER_USER_AGENT } });
+      if (!res.ok) return null;
       const body = (await res.json()) as {
         archived_snapshots?: {
           closest?: { available?: boolean; timestamp?: string; status?: string };
@@ -489,12 +534,41 @@ async function resolveOnDemandCapture(
       const closest = body.archived_snapshots?.closest;
       // A capture of an error page is not a page worth serving.
       if (closest?.available && closest.status === "200" && /^\d{14}$/.test(closest.timestamp ?? "")) {
-        capture = { ts: closest.timestamp!, url: target };
-        break;
+        return { ts: closest.timestamp!, url: target };
       }
     } catch {
-      // Try the next host form; a network blip must not become a 404.
+      // A network blip must not become a 404; try the next host/scheme group.
     }
+    return null;
+  };
+
+  // Check HTTPS aliases in parallel and return the first valid capture. The archive
+  // records bare and www hosts separately; retaining the exact URL from each response
+  // preserves replay correctness without waiting for a slower alias after a hit.
+  const probeGroup = async (targets: string[]): Promise<OnDemandCapture | null> => {
+    if (targets.length === 0) return null;
+    return new Promise((resolve) => {
+      let remaining = targets.length;
+      let settled = false;
+      for (const target of targets) {
+        void probe(target).then((result) => {
+          if (settled) return;
+          if (result) {
+            settled = true;
+            resolve(result);
+            return;
+          }
+          remaining -= 1;
+          if (remaining === 0) resolve(null);
+        });
+      }
+    });
+  };
+
+  let capture: OnDemandCapture | null = null;
+  for (const targets of [httpsTargets, httpTargets]) {
+    capture = await probeGroup(targets);
+    if (capture) break;
   }
 
   try {
@@ -589,14 +663,17 @@ export async function fetchOnDemand(
   const rawUrl = `${WAYBACK_RAW_BASE}/${ts}id_/${originalUrl}`;
   const pageCsp = resourceOrigin ? snapshotCspForOrigin(resourceOrigin) : snapshotCsp();
 
-  const upstream = await fetch(rawUrl, {
-    headers: { "User-Agent": env.CRAWLER_USER_AGENT },
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(rawUrl, {
+      headers: { "User-Agent": env.CRAWLER_USER_AGENT },
+    });
+  } catch {
+    return viewerFailure(502, "The archive could not be reached", "The archived page could not be downloaded. Reload to try again.");
+  }
 
   if (!upstream.ok) {
-    return new Response(`Archive fetch failed: ${upstream.status}`, {
-      status: 502,
-    });
+    return viewerFailure(502, "The archive could not serve this page", `The archived page returned HTTP ${upstream.status}. Reload to try again.`);
   }
 
   const injection = headInjection({
@@ -608,7 +685,15 @@ export async function fetchOnDemand(
     // that would be counted have been seen, and a partial count would be worse than
     // none. The stub markers themselves are the record of what was stubbed.
     metas: {
-      "cw-mirror": JSON.stringify({ day, url: originalUrl, ts, source: "on-demand", resourceProxy: true }),
+      "cw-mirror": JSON.stringify({
+        day,
+        url: originalUrl,
+        ts,
+        source: "on-demand",
+        resolvedDay: resolvedDay ?? `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`,
+        deltaDays: deltaDays ?? null,
+        resourceProxy: true,
+      }),
     },
   });
 

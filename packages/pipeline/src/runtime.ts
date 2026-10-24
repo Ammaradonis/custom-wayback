@@ -9,7 +9,7 @@
  *   2. Swallows errors from dead third-party endpoints so the page looks intact
  *      instead of hanging for 30 s and spraying the console.
  *   3. Reports state to the host shell (toolbar) over postMessage, including a count
- *      of dead-request events for the "N blocked requests" badge.
+ *      of dead-request events for the "N unavailable resources" badge.
  */
 
 export const RUNTIME_SCRIPT = String.raw`
@@ -94,6 +94,9 @@ export const RUNTIME_SCRIPT = String.raw`
   window.addEventListener('error', function (ev) {
     var t = ev && ev.target;
     if (t && (t.tagName === 'SCRIPT' || t.tagName === 'IMG' || t.tagName === 'LINK')) {
+      // Removing a node during navigation cancels its request and can fire an error;
+      // disconnected nodes are lifecycle cancellations, not blocked archive assets.
+      if (t.isConnected === false) return;
       countDead('asset:' + (t.tagName || '?') + ':' + (t.src || t.href || ''));
       return;
     }
@@ -223,7 +226,10 @@ export const RUNTIME_SCRIPT = String.raw`
         input = mirrorUrl;
         init = proxyOptions;
       }
-      return origFetch.call(this, input, init).catch(function () {
+      return origFetch.call(this, input, init).catch(function (error) {
+        // Site routers routinely abort fetches when the visitor changes pages. Keep
+        // the browser's normal AbortError behavior and do not call those requests blocked.
+        if (error && error.name === 'AbortError') return Promise.reject(error);
         countDead('fetch:' + String((input && input.url) || input || ''));
         return new Response('', { status: 599, statusText: 'blocked-by-mirror' });
       });
@@ -332,13 +338,24 @@ export const RUNTIME_SCRIPT = String.raw`
 
   // ---- 3. Tell the shell we are interactive ------------------------------
   var flags = { deadLinks: 0, missingAssets: 0, stubbedScripts: 0 };
+  var mirrorInfo = null;
   try {
     var meta = document.querySelector('meta[name="cw-mirror"]');
     if (meta) {
       var parsed = JSON.parse(meta.getAttribute('content') || '{}');
+      mirrorInfo = parsed;
       if (parsed && parsed.flags) flags = parsed.flags;
     }
   } catch (e) { /* flags are decoration; never break the page over them */ }
+  var reportMetadata = function () {
+    if (!mirrorInfo) return;
+    report('cw:metadata', {
+      source: mirrorInfo.source || null,
+      resolvedDay: mirrorInfo.resolvedDay || null,
+      deltaDays: typeof mirrorInfo.deltaDays === 'number' ? mirrorInfo.deltaDays : null
+    });
+  };
+  reportMetadata();
 
   // Surface unresolvable links the moment the page is interactive, so the shell can
   // say "18 links here point at pages this mirror does not have" instead of letting
@@ -371,6 +388,7 @@ export const RUNTIME_SCRIPT = String.raw`
     var data = ev && ev.data;
     if (!data || data.__cw !== true) return;
     if (data.type === 'cw:ping') report('cw:pong', { href: location.href, title: document.title || '' });
+    if (data.type === 'cw:request-metadata') reportMetadata();
     if (data.type === 'cw:request-links') {
       // Collect unique /a/ hrefs for SW prefetch, deduped, top 8.
       var seen = {};

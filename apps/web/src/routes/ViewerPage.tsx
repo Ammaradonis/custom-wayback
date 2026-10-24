@@ -8,7 +8,7 @@
  *  - Horizontal day-strip (scroll): one button per captured day, current highlighted
  *  - Full-height sandboxed iframe for the archived page
  *  - Stats slide-up panel (on "⋯" tap)
- *  - Toast notifications for blocked requests / errors from the iframe
+ *  - Toast notifications for unavailable resources / errors from the iframe
  *  - Nearest-capture badge when the served day differs from requested
  *  - Dead-request counter via postMessage bridge
  *  - Share button (plan §15): mints a link for exactly the page on screen
@@ -40,7 +40,7 @@ const ShareDialog = lazy(() =>
 
 interface CwMessage {
   __cw: true;
-  type: "cw:dead-request" | "cw:error" | "cw:navigate" | "cw:links" | "cw:ready";
+  type: "cw:dead-request" | "cw:error" | "cw:navigate" | "cw:links" | "cw:metadata" | "cw:ready" | "cw:failure";
   detail?: unknown;
 }
 
@@ -97,6 +97,7 @@ export default function ViewerPage() {
   const [currentRoute, setCurrentRoute] = useState(`/a/${domain}/${day}/${wildcard}`);
   const [navStack, setNavStack] = useState<string[]>([`/a/${domain}/${day}/${wildcard}`]);
   const [deadCount, setDeadCount] = useState(0);
+  const [lastBlockedRequest, setLastBlockedRequest] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
@@ -104,6 +105,7 @@ export default function ViewerPage() {
   const [deltaDays, setDeltaDays] = useState<number | null>(null);
   const [source, setSource] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadStage, setLoadStage] = useState("Finding archived page");
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
 
   // Keep currentRoute in sync when React Router params change (e.g. day-strip click
@@ -117,29 +119,18 @@ export default function ViewerPage() {
       return [...s, route];
     });
     setLoading(true);
+    setLoadStage("Finding archived page");
+    setDeadCount(0);
+    setLastBlockedRequest(null);
+    setResolvedDay(null);
+    setDeltaDays(null);
+    setSource(null);
     runtimeReadyRef.current = false;
     if (loadingFallbackRef.current !== null) {
       window.clearTimeout(loadingFallbackRef.current);
       loadingFallbackRef.current = null;
     }
     setViewerError(null);
-    // Fetch toolbar headers for the new route so the resolved-day badge and
-    // source indicator update correctly. This is a HEAD request — no body, cheap.
-    void fetch(route, { method: "HEAD" }).then((r) => {
-      setResolvedDay(r.headers.get("X-Wayback-Resolved-Day"));
-      const dd = r.headers.get("X-Wayback-Delta-Days");
-      setDeltaDays(dd ? parseInt(dd, 10) : null);
-      setSource(r.headers.get("X-Custom-Wayback-Source"));
-      if (!r.ok) {
-        setViewerError(
-          r.status === 404
-            ? "No archived page was found for this date. Try another day or return to the dashboard."
-            : `The viewer returned HTTP ${r.status}. Try reloading this page.`,
-        );
-      }
-    }).catch(() => {
-      setViewerError("Could not reach the archive viewer. Check your connection and try again.");
-    });
     return () => {
       if (loadingFallbackRef.current !== null) {
         window.clearTimeout(loadingFallbackRef.current);
@@ -172,17 +163,35 @@ export default function ViewerPage() {
       if (!e.data || (e.data as CwMessage).__cw !== true) return;
       const msg = e.data as CwMessage;
       if (msg.type === "cw:dead-request") {
+        const detail = msg.detail as { why?: string } | null;
+        if (detail?.why) setLastBlockedRequest(detail.why);
         setDeadCount((n) => {
           const next = n + 1;
-          if (next === 1 || next % 10 === 0) showToast(`${next} blocked/dead requests silenced`);
+          if (next === 1 || next % 10 === 0) showToast(`${next} archived resource${next === 1 ? "" : "s"} unavailable`);
           return next;
         });
+      } else if (msg.type === "cw:metadata") {
+        const detail = msg.detail as { source?: string | null; resolvedDay?: string | null; deltaDays?: number | null } | null;
+        setSource(detail?.source ?? null);
+        setResolvedDay(detail?.resolvedDay ?? null);
+        setDeltaDays(typeof detail?.deltaDays === "number" ? detail.deltaDays : null);
+        setLoadStage("Rendering archived page");
+      } else if (msg.type === "cw:failure") {
+        const detail = msg.detail as { message?: string } | null;
+        setViewerError(detail?.message ?? "The archived page could not be loaded. Try reloading.");
+        runtimeReadyRef.current = true;
+        if (loadingFallbackRef.current !== null) {
+          window.clearTimeout(loadingFallbackRef.current);
+          loadingFallbackRef.current = null;
+        }
+        setLoading(false);
       } else if (msg.type === "cw:ready") {
         runtimeReadyRef.current = true;
         if (loadingFallbackRef.current !== null) {
           window.clearTimeout(loadingFallbackRef.current);
           loadingFallbackRef.current = null;
         }
+        setLoadStage("Page ready");
         setLoading(false);
       } else if (msg.type === "cw:navigate") {
         const detail = msg.detail as { url?: string; replace?: boolean };
@@ -366,14 +375,19 @@ export default function ViewerPage() {
           </span>
         )}
         {loading && (
-          <span className="text-[10px] text-muted-foreground animate-pulse" role="status">
+          <span className="text-[10px] text-muted-foreground animate-pulse" role="status" title={loadStage}>
             <span aria-hidden>…</span>
-            <span className="sr-only">Loading</span>
+            <span className="ml-1 hidden max-w-[7rem] truncate sm:inline">{loadStage}</span>
+            <span className="sr-only">{loadStage}</span>
           </span>
         )}
         {deadCount > 0 && (
-          <span className="text-[10px] tabular-nums text-warning-foreground">
-            {deadCount} blocked
+          <span
+            className="text-[10px] tabular-nums text-warning-foreground"
+            title={lastBlockedRequest ? `Last unavailable resource: ${lastBlockedRequest}` : "An archived resource failed to load"}
+            aria-label={`${deadCount} archived resources failed to load`}
+          >
+            {deadCount} unavailable
           </span>
         )}
 
@@ -509,7 +523,7 @@ export default function ViewerPage() {
                 aria-label="Archived page loading progress"
                 aria-valuemin={0}
                 aria-valuemax={100}
-                aria-valuetext="Loading archived page"
+                aria-valuetext={loadStage}
               >
                 <div className="cw-progress-fill cw-progress-fill-indeterminate" />
               </div>
@@ -552,20 +566,18 @@ export default function ViewerPage() {
                     setLoading(false);
                   }, 1200);
                 }
-                // The iframe is sandboxed without allow-same-origin, so
-                // contentDocument is always null. Link interception and prefetch are
-                // handled by the runtime script injected at ingest/on-demand time,
-                // which uses postMessage to communicate back (cw:navigate, cw:dead-request).
-                // Ask the runtime to send back the top in-site links for SW prefetch.
-                if (
-                  "serviceWorker" in navigator &&
-                  navigator.serviceWorker.controller &&
-                  iframeRef.current?.contentWindow
-                ) {
-                  iframeRef.current.contentWindow.postMessage(
-                    { __cw: true, type: "cw:request-links" },
-                    "*",
-                  );
+                // Re-request these messages in case a very fast cached page posted
+                // before React attached its message listener.
+                const frameWindow = iframeRef.current?.contentWindow;
+                if (frameWindow) {
+                  frameWindow.postMessage({ __cw: true, type: "cw:request-metadata" }, "*");
+                  frameWindow.postMessage({ __cw: true, type: "cw:request-failure" }, "*");
+                  // The iframe is sandboxed without allow-same-origin, so
+                  // contentDocument is always null. Ask the runtime for its top
+                  // in-site links so the service worker can prefetch them.
+                  if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+                    frameWindow.postMessage({ __cw: true, type: "cw:request-links" }, "*");
+                  }
                 }
               }}
             />
