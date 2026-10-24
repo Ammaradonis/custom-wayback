@@ -401,7 +401,17 @@ class FakeSnapshotDb {
           return statement;
         },
         async first() {
-          if (/^SELECT id, r2_key, ts, resolved_day, delta_days, purged_at, served_at FROM snapshots/i.test(normalised)) {
+          // The route now also selects `url`, because the on-demand path needs the
+          // capture's *original* URL to build the id_ request and the resource proxy.
+          // Recognising the statement by its leading columns rather than its exact text
+          // keeps the fake from silently answering "no such snapshot" the moment a
+          // column is added — which presents as a 404 for a page that exists.
+          if (
+            /^SELECT id, r2_key, ts, resolved_day, delta_days, purged_at, served_at(?:, url)? FROM snapshots/i.test(
+              normalised,
+            ) ||
+            /^SELECT .*\burl\b.* FROM snapshots/i.test(normalised)
+          ) {
             return self.snapshot;
           }
           if (/^SELECT resolved_day FROM link_resolutions/i.test(normalised)) {
