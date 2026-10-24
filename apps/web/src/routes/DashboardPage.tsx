@@ -27,6 +27,7 @@ import {
   auth,
   manifests,
   clearToken,
+  watchIngest,
   type DomainEntry,
   type IngestProgressEvent,
 } from "@/lib/api.js";
@@ -70,6 +71,10 @@ function useTick(active: boolean): number {
     return () => clearInterval(id);
   }, [active]);
   return Math.floor(Date.now() / 1000);
+}
+
+function isTerminalJob(status: string | undefined): boolean {
+  return status === "ready" || status === "partial" || status === "failed";
 }
 
 // ── Per-domain state ─────────────────────────────────────────────────────────
@@ -176,7 +181,9 @@ function DomainRow({
    * requested for, and those pages must still be reachable.
    */
   const manifestDays = manifest?.days ?? [];
-  const viewDay = selectedDay ?? manifestDays[manifestDays.length - 1] ?? null;
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const viewDay = selectedDay ?? manifestDays[manifestDays.length - 1] ?? todayIso;
+  const viewIsGuess = selectedDay === null && manifestDays.length === 0;
 
   return (
     <li className="cw-panel space-y-3 p-4">
@@ -236,20 +243,20 @@ function DomainRow({
           stored pages looked like a month with nothing in it — which is the "View shows
           nothing" report.
         */}
-        {viewDay && (
-          <button
-            type="button"
-            onClick={() => navigate(`/a/${entry.domain}/${viewDay}/`)}
-            className="cw-btn cw-btn-secondary"
-            title={
-              selectedDay
-                ? `Open ${entry.domain} on ${viewDay}`
+        <button
+          type="button"
+          onClick={() => navigate(`/a/${entry.domain}/${viewDay}/`)}
+          className="cw-btn cw-btn-secondary"
+          title={
+            selectedDay
+              ? `Open ${entry.domain} on ${viewDay}`
+              : viewIsGuess
+                ? `Open the closest capture to ${viewDay}`
                 : `Open the newest captured day (${viewDay})`
-            }
-          >
-            View <ExternalLink className="h-3.5 w-3.5" aria-hidden />
-          </button>
-        )}
+          }
+        >
+          View <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+        </button>
 
         {/* Share this month, or the picked day's page (plan §15). */}
         <button
@@ -302,7 +309,67 @@ function DomainRow({
  * exists to prevent, so an open circuit breaker is shown as an amber "resuming
  * in Ns" line that ticks down, and a degraded finish says why.
  */
-function CrawlProgress({ job }: { job: IngestProgressEvent }) {
+function ProgressTrack({
+  label,
+  done,
+  total,
+  active,
+  complete,
+}: {
+  label: string;
+  done: number;
+  total: number;
+  active: boolean;
+  complete: boolean;
+}) {
+  const hasTotal = total > 0;
+  const known = hasTotal || complete;
+  const percent = complete ? 100 : hasTotal ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const valueLabel = complete
+    ? "Complete"
+    : hasTotal
+      ? `${done.toLocaleString()} / ${total.toLocaleString()}`
+      : active
+        ? "Working…"
+        : "Waiting";
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="font-medium text-foreground">{label}</span>
+        <span className="tabular-nums text-muted-foreground">{valueLabel}</span>
+      </div>
+      <div
+        className="cw-progress-track"
+        role="progressbar"
+        aria-label={`${label} progress`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        {...(known
+          ? { "aria-valuenow": percent }
+          : { "aria-valuetext": active ? `${label} work is in progress` : `${label} work has not started` })}
+      >
+        <div
+          className={[
+            "cw-progress-fill",
+            !known && active ? "cw-progress-fill-indeterminate" : "",
+          ].join(" ")}
+          style={known ? { width: `${percent}%` } : undefined}
+        />
+      </div>
+    </div>
+  );
+}
+
+function CrawlProgress({
+  job,
+  connection,
+  connectionError,
+}: {
+  job: IngestProgressEvent;
+  connection: "connecting" | "live" | "polling" | "finished";
+  connectionError: string | null;
+}) {
   const throttle = job.throttle;
   const tick = useTick(throttle?.active === true);
   const resumeIn =
@@ -312,7 +379,16 @@ function CrawlProgress({ job }: { job: IngestProgressEvent }) {
 
   const pagesTotal = job.pagesTotal ?? 0;
   const pagesDone = job.pagesDone ?? 0;
-  const pct = pagesTotal > 0 ? Math.round((pagesDone / pagesTotal) * 100) : 0;
+  const assetsTotal = job.assetsTotal ?? 0;
+  const assetsDone = job.assetsDone ?? 0;
+  const terminal = isTerminalJob(job.status);
+  const stage = job.stage ?? "survey";
+  const pagesComplete = !terminal && ["assets", "finalize", "done"].includes(stage)
+    ? true
+    : job.status === "ready" || job.status === "partial";
+  const assetsComplete = job.status === "ready" || job.status === "partial" || ["finalize", "done"].includes(stage);
+  const pagesActive = !terminal && !pagesComplete;
+  const assetsActive = !terminal && !assetsComplete && (stage === "assets" || assetsTotal > 0);
 
   return (
     <>
@@ -327,9 +403,6 @@ function CrawlProgress({ job }: { job: IngestProgressEvent }) {
         </p>
         <p>
           Pages: {pagesDone} / {pagesTotal}
-        </p>
-        <p>
-          Assets: {job.assetsDone ?? 0} / {job.assetsTotal ?? 0}
         </p>
         <p>Stored: {fmt(job.bytesStored ?? 0)}</p>
 
@@ -355,21 +428,42 @@ function CrawlProgress({ job }: { job: IngestProgressEvent }) {
         {job.degradedReason && (
           <p className="text-warning-foreground">Partial result: {job.degradedReason}</p>
         )}
+        {job.errorMessage && (
+          <p className="text-danger-foreground" role="alert">{job.errorMessage}</p>
+        )}
+        {connection === "connecting" && (
+          <p className="text-muted-foreground" role="status" aria-live="polite">
+            Connecting to live crawl updates…
+          </p>
+        )}
+        {connection === "polling" && (
+          <p className="text-warning-foreground" role="status" aria-live="polite">
+            Live updates disconnected; checking crawl status automatically.
+          </p>
+        )}
+        {connectionError && connection === "polling" && (
+          <p className="text-warning-foreground" role="status" aria-live="polite">
+            {connectionError}
+          </p>
+        )}
       </div>
 
-      {pagesTotal > 0 && (
-        <div className="h-2 rounded-full bg-muted overflow-hidden">
-          <div
-            className="h-full bg-accent transition-all duration-500"
-            role="progressbar"
-            aria-label="Crawl progress"
-            aria-valuenow={pct}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            style={{ width: `${pct}%` }}
-          />
-        </div>
-      )}
+      <div className="space-y-3" aria-label="Crawl work progress">
+        <ProgressTrack
+          label="Pages"
+          done={pagesDone}
+          total={pagesTotal}
+          active={pagesActive}
+          complete={pagesComplete}
+        />
+        <ProgressTrack
+          label="Assets"
+          done={assetsDone}
+          total={assetsTotal}
+          active={assetsActive}
+          complete={assetsComplete}
+        />
+      </div>
     </>
   );
 }
@@ -384,6 +478,9 @@ export default function DashboardPage() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeJobDomainId, setActiveJobDomainId] = useState<string | null>(null);
   const [jobProgress, setJobProgress] = useState<IngestProgressEvent | null>(null);
+  const [progressConnection, setProgressConnection] = useState<"connecting" | "live" | "polling" | "finished">("connecting");
+  const [progressError, setProgressError] = useState<string | null>(null);
+  const [crawlStartError, setCrawlStartError] = useState<string | null>(null);
   const [shareTarget, setShareTarget] = useState<ShareRequest>(null);
 
   // Per-domain calendar/selection state.
@@ -426,33 +523,122 @@ export default function DashboardPage() {
     onSuccess: (data, vars) => {
       setActiveJobId(data.id);
       setActiveJobDomainId(vars.domainId);
-      setJobProgress(null);
-
-      const es = new EventSource(`/v1/jobs/${data.id}/events`);
-      es.onmessage = (e) => {
-        const ev = JSON.parse(e.data as string) as IngestProgressEvent;
-        // The stream now opens with `{ type: "open" }`, which carries no
-        // counters — keep the previous frame rather than blanking the panel.
-        if (ev.type === "open") return;
-        if (ev.type === "progress") setJobProgress(ev);
-        if (ev.type === "done") {
-          es.close();
-          setActiveJobId(null);
-          setActiveJobDomainId(null);
-          void qc.invalidateQueries({ queryKey: ["domains"] });
-          // The month's spend and quota just moved; refresh the cost panel too.
-          void qc.invalidateQueries({ queryKey: ["usage"] });
-          // Invalidate coverage caches for this domain.
-          void qc.invalidateQueries({ queryKey: ["coverage", vars.domainId] });
-        }
-      };
-      es.onerror = () => {
-        es.close();
-        setActiveJobId(null);
-        setActiveJobDomainId(null);
-      };
+      setJobProgress({
+        type: "progress",
+        ingestId: data.id,
+        status: data.status,
+        stage: "survey",
+        pagesTotal: 0,
+        pagesDone: 0,
+        assetsTotal: 0,
+        assetsDone: 0,
+        bytesStored: 0,
+        throttle: { active: false, resumeAt: null, consecutive: 0, message: null },
+      });
+      setProgressConnection("connecting");
+      setProgressError(null);
+      setCrawlStartError(null);
     },
+    onError: (err: Error) => setCrawlStartError(err.message),
   });
+
+  // Stream job updates with an authenticated fetch (native EventSource cannot send
+  // the app's Bearer token). If the stream drops, keep the panel alive and fall
+  // back to the authenticated status endpoint until the job reaches a final state.
+  useEffect(() => {
+    if (!activeJobId) return;
+
+    let stopped = false;
+    let fallbackStarted = false;
+    let pollTimer: number | undefined;
+    let stopWatching: () => void = () => {};
+
+    const finish = (status: string, errorMessage?: string | null) => {
+      setJobProgress((current) => current
+        ? {
+            ...current,
+            type: "progress",
+            status,
+            stage: "done",
+            errorMessage: errorMessage === undefined ? current.errorMessage ?? null : errorMessage,
+          }
+        : current);
+      setProgressConnection("finished");
+      setActiveJobId((current) => current === activeJobId ? null : current);
+      setActiveJobDomainId((current) => current === activeJobDomainId ? null : current);
+      void qc.invalidateQueries({ queryKey: ["domains"] });
+      void qc.invalidateQueries({ queryKey: ["usage"] });
+      if (activeJobDomainId) {
+        void qc.invalidateQueries({ queryKey: ["coverage", activeJobDomainId] });
+      }
+    };
+
+    const pollStatus = async () => {
+      if (stopped) return;
+      try {
+        const job = await ingest.status(activeJobId);
+        if (stopped) return;
+        setJobProgress({
+          type: "progress",
+          ingestId: job.id,
+          status: job.status,
+          stage: job.stage,
+          pagesTotal: job.pagesTotal,
+          pagesDone: job.pagesDone,
+          assetsTotal: job.assetsTotal,
+          assetsDone: job.assetsDone,
+          bytesStored: job.bytesStored,
+          ia429Count: job.ia429Count,
+          errorMessage: job.errorMessage,
+          attempts: job.attempts,
+          degradedReason: job.degradedReason,
+          throttle: job.throttle,
+        });
+        setProgressError(null);
+        if (isTerminalJob(job.status)) {
+          finish(job.status, job.errorMessage);
+          return;
+        }
+      } catch (error) {
+        if (stopped) return;
+        setProgressError(error instanceof Error ? error.message : "Could not read crawl status.");
+      }
+      if (!stopped) pollTimer = window.setTimeout(() => void pollStatus(), 5000);
+    };
+
+    stopWatching = watchIngest(
+      activeJobId,
+      (event) => {
+        if (event.type === "open") {
+          setProgressConnection("live");
+          setProgressError(null);
+          return;
+        }
+        if (event.type === "progress") {
+          setJobProgress(event);
+          setProgressConnection("live");
+          setProgressError(null);
+          if (isTerminalJob(event.status)) finish(event.status!, event.errorMessage);
+          return;
+        }
+        if (event.type === "done") finish(event.status ?? "failed", event.errorMessage);
+      },
+      (error) => {
+        if (stopped || fallbackStarted) return;
+        fallbackStarted = true;
+        setProgressConnection("polling");
+        setProgressError(error.message);
+        stopWatching();
+        void pollStatus();
+      },
+    );
+
+    return () => {
+      stopped = true;
+      stopWatching();
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+    };
+  }, [activeJobId, activeJobDomainId, qc]);
 
   async function handleLogout() {
     try { await auth.logout(); } catch { /* ignore */ }
@@ -588,11 +774,44 @@ export default function DashboardPage() {
         </section>
 
         {/* ── Active job progress ── */}
-        {activeJobId && (
+        {jobProgress && (
           <section className="cw-panel space-y-3 p-4">
-            <h2 className="text-sm font-semibold">Crawl in progress…</h2>
-            {jobProgress && <CrawlProgress job={jobProgress} />}
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-sm font-semibold">
+                {activeJobId
+                  ? "Crawl in progress…"
+                  : jobProgress.status === "ready"
+                    ? "Crawl complete"
+                    : jobProgress.status === "partial"
+                      ? "Crawl finished with partial results"
+                      : jobProgress.status === "failed"
+                        ? "Crawl failed"
+                        : "Crawl status"}
+              </h2>
+              {!activeJobId && (
+                <button
+                  type="button"
+                  className="cw-btn cw-btn-ghost"
+                  onClick={() => {
+                    setJobProgress(null);
+                    setProgressError(null);
+                  }}
+                >
+                  Dismiss
+                </button>
+              )}
+            </div>
+            <CrawlProgress
+              job={jobProgress}
+              connection={progressConnection}
+              connectionError={progressError}
+            />
           </section>
+        )}
+        {crawlStartError && (
+          <p className="text-sm text-danger-foreground" role="alert">
+            Crawl could not start: {crawlStartError}
+          </p>
         )}
 
         {/* ── Cost & politeness (plan §11.5 / §12) ── */}

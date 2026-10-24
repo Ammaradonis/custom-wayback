@@ -53,6 +53,10 @@
   from { transform: translateY(0); }
   to   { transform: translateY(100%); }
 }
+@keyframes cw-progress-indeterminate {
+  from { transform: translateX(-115%); }
+  to   { transform: translateX(315%); }
+}
 
 /* Tailwind v4 @utility shorthand for the data-[state=…] animation classes. */
 @utility animate-in {
@@ -104,6 +108,12 @@
   [data-state="closed"] {
     animation-duration: 1ms !important;
   }
+  .cw-progress-fill-indeterminate {
+    animation-duration: 3.5s;
+    animation-iteration-count: 1;
+    animation-name: none;
+    transform: translateX(100%);
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -117,6 +127,26 @@
  * ════════════════════════════════════════════════════════════════════════════ */
 
 @layer components {
+  .cw-progress-track {
+    position: relative;
+    height: 0.625rem;
+    overflow: hidden;
+    border-radius: 9999px;
+    background-color: var(--color-muted);
+  }
+
+  .cw-progress-fill {
+    height: 100%;
+    border-radius: inherit;
+    background-color: var(--color-accent);
+    transition: width 300ms ease;
+  }
+
+  .cw-progress-fill-indeterminate {
+    width: 34%;
+    animation: cw-progress-indeterminate 1.4s ease-in-out infinite;
+  }
+
   /* ── Native form controls ──────────────────────────────────────────────
    * The contrast bug in the report lived here: with `border-input` and
    * `bg-background` unemitted, a <select> fell back to the UA look — a control

@@ -329,13 +329,25 @@ async function resolveOnDemandCapture(
     // KV is a cache; a miss or an error both mean "ask archive.org".
   }
 
-  const target = `https://${domain}${path}`;
-  const probe = `${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(target)}&timestamp=${stamp}`;
+  /**
+   * Try the bare host, then the `www.` form.
+   *
+   * The archive indexes captures under whatever host the page was crawled from, and the
+   * two are not interchangeable: `https://university.com/` has **no capture at all**
+   * (the availability API answers `{}`), while `https://www.university.com/` has one the
+   * same week. Without the second probe the viewer answers 404 for a site that is
+   * captured — the exact "nothing renders" symptom — so a miss on the bare host is worth
+   * one more request.
+   */
+  const targets = [`https://${domain}${path}`];
+  if (!domain.startsWith("www.")) targets.push(`https://www.${domain}${path}`);
 
   let ts: string | null = null;
-  try {
-    const res = await fetch(probe, { headers: { "User-Agent": env.CRAWLER_USER_AGENT } });
-    if (res.ok) {
+  for (const target of targets) {
+    const probe = `${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(target)}&timestamp=${stamp}`;
+    try {
+      const res = await fetch(probe, { headers: { "User-Agent": env.CRAWLER_USER_AGENT } });
+      if (!res.ok) continue;
       const body = (await res.json()) as {
         archived_snapshots?: {
           closest?: { available?: boolean; timestamp?: string; status?: string };
@@ -345,10 +357,11 @@ async function resolveOnDemandCapture(
       // A capture of an error page is not a page worth serving.
       if (closest?.available && closest.status === "200" && /^\d{14}$/.test(closest.timestamp ?? "")) {
         ts = closest.timestamp ?? null;
+        break;
       }
+    } catch {
+      // Try the next host form; a network blip must not become a 404.
     }
-  } catch {
-    return null;
   }
 
   try {
@@ -541,6 +554,12 @@ export async function fetchOnDemand(
   // gives us a mutable list, so the decoration works.
   const headers = new Headers({
     "Content-Type": "text/html; charset=utf-8",
+    // The same content policy the R2 path sets as a header. The rewrite also emits it as
+    // a `<meta http-equiv>`, but a header is the one the browser enforces before parsing
+    // and the one that survives anything the page does to its own `<head>`; serving the
+    // two planes with different strengths meant a page's security posture depended on
+    // whether it happened to be cached.
+    "Content-Security-Policy": snapshotCsp(),
     // Not the ingest path's `immutable, max-age=31536000`: this rendition is missing
     // the asset rewrite, and it becomes the *good* rendition again after a re-ingest
     // clears `purged_at`. Freezing the weaker one in a browser or CDN cache would make

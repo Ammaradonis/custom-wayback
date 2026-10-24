@@ -96,6 +96,7 @@ export default function ViewerPage() {
   const [navStack, setNavStack] = useState<string[]>([`/a/${domain}/${day}/${wildcard}`]);
   const [deadCount, setDeadCount] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
+  const [viewerError, setViewerError] = useState<string | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
   const [resolvedDay, setResolvedDay] = useState<string | null>(null);
   const [deltaDays, setDeltaDays] = useState<number | null>(null);
@@ -114,6 +115,7 @@ export default function ViewerPage() {
       return [...s, route];
     });
     setLoading(true);
+    setViewerError(null);
     // Fetch toolbar headers for the new route so the resolved-day badge and
     // source indicator update correctly. This is a HEAD request — no body, cheap.
     void fetch(route, { method: "HEAD" }).then((r) => {
@@ -121,7 +123,16 @@ export default function ViewerPage() {
       const dd = r.headers.get("X-Wayback-Delta-Days");
       setDeltaDays(dd ? parseInt(dd, 10) : null);
       setSource(r.headers.get("X-Custom-Wayback-Source"));
-    }).catch(() => void 0);
+      if (!r.ok) {
+        setViewerError(
+          r.status === 404
+            ? "No archived page was found for this date. Try another day or return to the dashboard."
+            : `The viewer returned HTTP ${r.status}. Try reloading this page.`,
+        );
+      }
+    }).catch(() => {
+      setViewerError("Could not reach the archive viewer. Check your connection and try again.");
+    });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [domain, day, wildcard]);
 
@@ -209,6 +220,12 @@ export default function ViewerPage() {
     } else {
       showToast(`No pages stored for ${targetDay}`);
     }
+  }
+
+  function handleReload() {
+    setViewerError(null);
+    setLoading(true);
+    if (iframeRef.current) iframeRef.current.src = currentRoute;
   }
 
   function handleBack() {
@@ -335,7 +352,7 @@ export default function ViewerPage() {
 
         <button
           type="button"
-          onClick={() => { if (iframeRef.current) iframeRef.current.src = currentRoute; }}
+          onClick={handleReload}
           className="cw-btn cw-btn-ghost cw-btn-icon"
           aria-label="Reload"
           title="Reload"
@@ -457,31 +474,69 @@ export default function ViewerPage() {
             </div>
           </div>
         ) : (
-          <iframe
-            ref={iframeRef}
-            src={currentRoute}
-            title={`Archived: ${domain} on ${day}`}
-            sandbox="allow-scripts allow-forms allow-popups"
-            className="absolute inset-0 w-full h-full border-0 bg-white"
-            onLoad={() => {
-              setLoading(false);
-              // The iframe is sandboxed without allow-same-origin, so
-              // contentDocument is always null. Link interception and prefetch are
-              // handled by the runtime script injected at ingest/on-demand time,
-              // which uses postMessage to communicate back (cw:navigate, cw:dead-request).
-              // Ask the runtime to send back the top in-site links for SW prefetch.
-              if (
-                "serviceWorker" in navigator &&
-                navigator.serviceWorker.controller &&
-                iframeRef.current?.contentWindow
-              ) {
-                iframeRef.current.contentWindow.postMessage(
-                  { __cw: true, type: "cw:request-links" },
-                  "*",
-                );
-              }
-            }}
-          />
+          <>
+            {loading && (
+              <div
+                className="cw-progress-track absolute inset-x-0 top-0 z-10 h-1 rounded-none"
+                role="progressbar"
+                aria-label="Archived page loading progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuetext="Loading archived page"
+              >
+                <div className="cw-progress-fill cw-progress-fill-indeterminate" />
+              </div>
+            )}
+            {viewerError && (
+              <div
+                className="cw-overlay overlay-shadow absolute inset-x-4 top-4 z-20 mx-auto max-w-md rounded-xl p-4 text-sm"
+                role="alert"
+              >
+                <p>{viewerError}</p>
+                <div className="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    className="cw-btn cw-btn-secondary"
+                    onClick={handleReload}
+                  >
+                    Try again
+                  </button>
+                  <button
+                    type="button"
+                    className="cw-btn cw-btn-ghost"
+                    onClick={() => navigate("/")}
+                  >
+                    Dashboard
+                  </button>
+                </div>
+              </div>
+            )}
+            <iframe
+              ref={iframeRef}
+              src={currentRoute}
+              title={`Archived: ${domain} on ${day}`}
+              sandbox="allow-scripts allow-forms allow-popups"
+              className="absolute inset-0 w-full h-full border-0 bg-white"
+              onLoad={() => {
+                setLoading(false);
+                // The iframe is sandboxed without allow-same-origin, so
+                // contentDocument is always null. Link interception and prefetch are
+                // handled by the runtime script injected at ingest/on-demand time,
+                // which uses postMessage to communicate back (cw:navigate, cw:dead-request).
+                // Ask the runtime to send back the top in-site links for SW prefetch.
+                if (
+                  "serviceWorker" in navigator &&
+                  navigator.serviceWorker.controller &&
+                  iframeRef.current?.contentWindow
+                ) {
+                  iframeRef.current.contentWindow.postMessage(
+                    { __cw: true, type: "cw:request-links" },
+                    "*",
+                  );
+                }
+              }}
+            />
+          </>
         )}
       </div>
 
