@@ -412,30 +412,18 @@ async function resolveOnDemandCapture(
  *      route                                            (§6.4 shim injection, CSP)
  *   4. `<script src>` is triaged: dead analytics/ad/tag-manager hosts become inert
  *      `text/plain` markers instead of live requests            (§6.4 script triage)
- *   5. `<form action>` is moved to `data-cw-action`, with submission disabled (§10)
- *   6. the response says which plane produced it, refuses indexing, and is not cached
+ *   5. archived asset URLs are routed through the same-origin resource proxy
+ *   6. form actions are disabled so captures cannot submit into the live internet
+ *   7. the response identifies its source, refuses indexing, and is not cached
  *
- * ## Deliberate scope limit: asset URLs are NOT rewritten here
+ * ## On-demand assets
  *
- * An on-demand page's `src`/`href`/`srcset`/CSS `url()` still point at their original
- * absolute URLs. That is not an oversight, and it cannot be fixed at read time:
- *
- *   - Remapping assets requires the content-addressed `assetMap` (original URL → hash),
- *     which only exists after the bytes have been fetched *and hashed*. That is the
- *     ingest job (§6.5); nothing on this path may fetch assets, because doing so would
- *     put archive.org back on the critical path that §3.1 removed and would turn one
- *     page view into hundreds of upstream requests.
- *   - The §10 CSP is applied unchanged, so those un-rewritten requests are blocked
- *     rather than allowed to leak the visitor's IP to whatever those hosts resolve to
- *     today (§10 "no third-party live network"). Blocking is instant; a page that
- *     fetches dead endpoints is the thirty-second hang §6.4 is about. That is what
- *     "contained rather than silently broken" means here, and the
- *     `X-Custom-Wayback-Source: on-demand` header is how a human can tell which plane
- *     served what they are looking at.
- *   - A deployment that wants images to load anyway can relax the policy per call with
- *     `headInjection({ csp: snapshotCsp("img-src 'self' data: blob: https://example.com") })`;
- *     that is a product decision, not a default.
- *
+ * Unlike ingest, this path has no content-addressed asset map. It rewrites resource
+ * URLs to the same-origin `/_cw/resource` route instead. That route fetches the
+ * matching Wayback `id_` resource, rewrites CSS references relative to the original
+ * stylesheet URL, and caches the result. The page's strict CSP therefore allows
+ * archived assets without allowing requests to the current live site. A per-page cap
+ * keeps one page from turning into an unbounded burst of archive requests.
  * Streaming matters: `HTMLRewriter` rewrites as the bytes arrive, with constant memory
  * and no DOM for a 2 MB page (§4). A parser that needs the whole document is the wrong
  * shape for a Worker on the critical path.
@@ -477,6 +465,8 @@ export async function fetchOnDemand(
   // Set when the head contract has been injected, so the no-head fallback below
   // cannot inject it twice.
   let injected = false;
+  let inlineStyle = "";
+  const resourceBudget = new Set<string>();
 
   const rewritten = new HTMLRewriter()
     // 1. De-base. Everything that is not the base we are about to inject is the
@@ -527,12 +517,70 @@ export async function fetchOnDemand(
       element(el) {
         const src = el.getAttribute("src");
         if (!src) return;
-        if (scriptDisposition(src) !== "stub") return;
-        el.replace(stubScriptHtml(src), { html: true });
+        if (scriptDisposition(src) === "stub") {
+          el.replace(stubScriptHtml(src), { html: true });
+          return;
+        }
+        el.setAttribute("src", onDemandResourceUrl(src, originalUrl, ts, resourceBudget));
       },
     })
-    // 5. Forms must not post into the live internet (§10). Same attributes as the
-    //    ingest rewriter writes, from the same contract data.
+    // 5. Archived assets are rewritten to the same-origin resource route.
+    .on("img[src], source[src], video[src], audio[src], track[src], embed[src], input[type=\"image\"][src]", {
+      element(el) {
+        const src = el.getAttribute("src");
+        if (src) el.setAttribute("src", onDemandResourceUrl(src, originalUrl, ts, resourceBudget));
+      },
+    })
+    .on("video[poster]", {
+      element(el) {
+        const poster = el.getAttribute("poster");
+        if (poster) el.setAttribute("poster", onDemandResourceUrl(poster, originalUrl, ts, resourceBudget));
+      },
+    })
+    .on("img[srcset], source[srcset]", {
+      element(el) {
+        const srcset = el.getAttribute("srcset");
+        if (srcset) el.setAttribute("srcset", rewriteOnDemandSrcset(srcset, originalUrl, ts, resourceBudget));
+      },
+    })
+    .on("img[data-src], img[data-original], img[data-lazy-src], img[data-original-src], img[data-image], img[data-srcset], img[data-lazy-srcset]", {
+      element(el) {
+        for (const attr of ["data-src", "data-original", "data-lazy-src", "data-original-src", "data-image"]) {
+          const value = el.getAttribute(attr);
+          if (value) el.setAttribute(attr, onDemandResourceUrl(value, originalUrl, ts, resourceBudget));
+        }
+        for (const attr of ["data-srcset", "data-lazy-srcset"]) {
+          const value = el.getAttribute(attr);
+          if (value) el.setAttribute(attr, rewriteOnDemandSrcset(value, originalUrl, ts, resourceBudget));
+        }
+      },
+    })
+    .on("link[href]", {
+      element(el) {
+        const rel = (el.getAttribute("rel") ?? "").toLowerCase().split(/\s+/);
+        if (!rel.some((item) => ["stylesheet", "icon", "preload", "modulepreload", "mask-icon", "apple-touch-icon"].includes(item))) return;
+        const href = el.getAttribute("href");
+        if (href) el.setAttribute("href", onDemandResourceUrl(href, originalUrl, ts, resourceBudget));
+      },
+    })
+    .on("[style]", {
+      element(el) {
+        const style = el.getAttribute("style");
+        if (style) el.setAttribute("style", rewriteOnDemandCss(style, originalUrl, ts, resourceBudget));
+      },
+    })
+    .on("style", {
+      text(text) {
+        inlineStyle += text.text;
+        if (!text.lastInTextNode) {
+          text.remove();
+          return;
+        }
+        text.replace(rewriteOnDemandCss(inlineStyle, originalUrl, ts, resourceBudget));
+        inlineStyle = "";
+      },
+    })
+    // 6. Keep archived form submissions disabled under the shared ingest contract.
     .on(HEAD_CONTRACT.form.element, {
       element(el) {
         const neutralised = formNeutralisation(el.getAttribute(HEAD_CONTRACT.form.actionAttribute));
@@ -544,7 +592,7 @@ export async function fetchOnDemand(
     })
     .transform(upstream);
 
-  // 6. Our own headers, on a `Headers` object this function owns.
+  // 7. Our own headers, on a `Headers` object this function owns.
   //
   // `rewritten.headers` is not reused: `HTMLRewriter.transform()` hands back the
   // upstream response's header guard, and downstream middleware (`secureHeaders` in
@@ -560,11 +608,11 @@ export async function fetchOnDemand(
     // two planes with different strengths meant a page's security posture depended on
     // whether it happened to be cached.
     "Content-Security-Policy": snapshotCsp(),
-    // Not the ingest path's `immutable, max-age=31536000`: this rendition is missing
-    // the asset rewrite, and it becomes the *good* rendition again after a re-ingest
-    // clears `purged_at`. Freezing the weaker one in a browser or CDN cache would make
-    // the difference permanent, and the CDN entry that matters is the one the R2 path
-    // populates deliberately.
+    // The reconstructed HTML is not frozen in a browser cache. Resource bytes are
+    // cached separately; re-ingest can update this page without a stale rendition
+    // lingering in a browser or CDN cache after `purged_at` is cleared.
+    //
+    //
     "Cache-Control": "no-store",
     "X-Custom-Wayback-Source": "on-demand",
     "X-Robots-Tag": HEAD_CONTRACT.robotsContent,
@@ -579,6 +627,180 @@ export async function fetchOnDemand(
 }
 
 // ── Toolbar headers ───────────────────────────────────────────────────────────
+
+const MAX_ON_DEMAND_RESOURCES = 120;
+
+/** Build a local resource URL while preserving fragments used by SVG sprites. */
+function onDemandResourceUrl(raw: string, base: string, ts: string, budget: Set<string>): string {
+  const value = raw.trim();
+  if (!value || /^(?:data|blob|javascript):/i.test(value) || value.startsWith("#")) return raw;
+
+  try {
+    const target = new URL(value, base);
+    if ((target.protocol !== "http:" && target.protocol !== "https:") || target.username || target.password) return raw;
+    const fragment = target.hash;
+    target.hash = "";
+    const key = target.href;
+    if (!budget.has(key) && budget.size >= MAX_ON_DEMAND_RESOURCES) return raw;
+    budget.add(key);
+    const query = new URLSearchParams({ ts, url: key });
+    return `/_cw/resource?${query.toString()}${fragment}`;
+  } catch {
+    return raw;
+  }
+}
+
+/** Rewrite srcset candidates without splitting the commas inside data URLs. */
+function rewriteOnDemandSrcset(value: string, base: string, ts: string, budget: Set<string>): string {
+  const candidates: string[] = [];
+  let cursor = 0;
+
+  while (cursor < value.length) {
+    while (cursor < value.length && /[\s,]/.test(value[cursor] ?? "")) cursor++;
+    if (cursor >= value.length) break;
+
+    const start = cursor;
+    while (cursor < value.length && !/\s/.test(value[cursor] ?? "")) cursor++;
+    const token = value.slice(start, cursor);
+    const trailingComma = /,+$/.exec(token)?.[0] ?? "";
+    const rawUrl = trailingComma ? token.slice(0, -trailingComma.length) : token;
+    let descriptor = "";
+
+    if (!trailingComma) {
+      while (cursor < value.length && /\s/.test(value[cursor] ?? "")) cursor++;
+      const descriptorStart = cursor;
+      while (cursor < value.length && value[cursor] !== ",") cursor++;
+      descriptor = value.slice(descriptorStart, cursor).trim();
+      if (value[cursor] === ",") cursor++;
+    }
+
+    if (rawUrl) {
+      const rewritten = onDemandResourceUrl(rawUrl, base, ts, budget);
+      candidates.push(descriptor ? `${rewritten} ${descriptor}` : rewritten);
+    }
+  }
+
+  return candidates.join(", ");
+}
+
+/** Rewrite CSS url() and quoted @import references against the CSS file's URL. */
+function rewriteOnDemandCss(css: string, base: string, ts: string, budget: Set<string>): string {
+  let rewritten = css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (whole, quote: string, raw: string) => {
+    const target = onDemandResourceUrl(raw, base, ts, budget);
+    if (target === raw) return whole;
+    const delimiter = quote || '"';
+    return `url(${delimiter}${target}${delimiter})`;
+  });
+
+  rewritten = rewritten.replace(/(@import\s+)(['"])([^'"]+)\2/gi, (whole, prefix: string, quote: string, raw: string) => {
+    const target = onDemandResourceUrl(raw, base, ts, budget);
+    return target === raw ? whole : `${prefix}${quote}${target}${quote}`;
+  });
+  return rewritten;
+}
+
+/** Fetch one archived dependency, rewriting CSS imports and caching the response. */
+export async function fetchOnDemandResource(
+  ts: string,
+  rawUrl: string,
+  env: Env,
+  ctx?: { waitUntil(promise: Promise<unknown>): void },
+): Promise<Response> {
+  if (!/^\d{14}$/.test(ts) || rawUrl.length > 2048) {
+    return new Response("Invalid archived resource request", { status: 400 });
+  }
+
+  let target: URL;
+  try {
+    target = new URL(rawUrl);
+  } catch {
+    return new Response("Invalid archived resource URL", { status: 400 });
+  }
+  if ((target.protocol !== "http:" && target.protocol !== "https:") || target.username || target.password) {
+    return new Response("Unsupported archived resource URL", { status: 400 });
+  }
+  target.hash = "";
+
+  const cacheQuery = new URLSearchParams({ ts, url: target.href });
+  const cacheKey = `https://cache.internal/_cw/resource?${cacheQuery.toString()}`;
+  let cached: Response | undefined;
+  try {
+    cached = await caches.default.match(cacheKey);
+  } catch {
+    // CDN cache is an optimization; archive fetch remains the source of truth.
+  }
+  if (cached) {
+    return new Response(cached.body, {
+      status: cached.status,
+      statusText: cached.statusText,
+      headers: new Headers(cached.headers),
+    });
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetchArchivedResource(ts, target.href, env);
+  } catch {
+    return new Response("Archive resource request failed", {
+      status: 502,
+      headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+  if (!upstream.ok || !upstream.body) {
+    return new Response(`Archived resource unavailable: ${upstream.status}`, {
+      status: upstream.status === 404 ? 404 : 502,
+      headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+
+  const upstreamType = upstream.headers.get("Content-Type") ?? "application/octet-stream";
+  const isCss = /^text\/css(?:\s*;|$)/i.test(upstreamType) || /\.css$/i.test(target.pathname);
+  let body: BodyInit | null = upstream.body;
+  let contentType = upstreamType;
+  if (isCss) {
+    const css = await upstream.text();
+    body = rewriteOnDemandCss(css, target.href, ts, new Set<string>());
+    contentType = "text/css; charset=utf-8";
+  }
+
+  const headers = new Headers({
+    "Content-Type": contentType,
+    "Cache-Control": "public, max-age=604800, s-maxage=31536000, immutable",
+    "X-Content-Type-Options": "nosniff",
+    "X-Custom-Wayback-Source": "on-demand-resource",
+  });
+  const response = new Response(body, { status: 200, headers });
+  const cacheWrite = caches.default.put(cacheKey, response.clone()).catch(() => void 0);
+  if (ctx) ctx.waitUntil(cacheWrite);
+  else await cacheWrite;
+  return response;
+}
+
+/** Keep archive redirects on the archive host; never let a resource URL redirect the Worker off-site. */
+async function fetchArchivedResource(ts: string, target: string, env: Env): Promise<Response> {
+  let current = `${WAYBACK_RAW_BASE}/${ts}id_/${target}`;
+  for (let redirects = 0; redirects <= 3; redirects++) {
+    const response = await fetch(current, {
+      headers: { "User-Agent": env.CRAWLER_USER_AGENT },
+      redirect: "manual",
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+
+    const location = response.headers.get("Location");
+    if (!location || redirects === 3) return response;
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      return new Response("Invalid archive redirect", { status: 502 });
+    }
+    if (next.protocol !== "https:" || next.hostname !== "web.archive.org") {
+      return new Response("Archive redirect was blocked", { status: 502 });
+    }
+    current = next.href;
+  }
+  return new Response("Too many archive redirects", { status: 502 });
+}
 
 function injectToolbarHeaders(
   response: Response,

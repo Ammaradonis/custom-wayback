@@ -27,14 +27,14 @@ import { logger } from "hono/logger";
 import { authRouter } from "./routes/auth.js";
 import { domainsRouter } from "./routes/domains.js";
 import { ingestRouter } from "./routes/ingest.js";
-import { viewerRouter } from "./routes/viewer.js";
+import { fetchOnDemandResource, viewerRouter } from "./routes/viewer.js";
 import { manifestRouter } from "./routes/manifest.js";
 import { searchRouter } from "./routes/search.js";
 import { sharesRouter } from "./routes/shares.js";
 import { compareRouter } from "./routes/compare.js";
 import { exportRouter } from "./routes/export.js";
 import { backupRouter, backupHealth } from "./routes/backup.js";
-import { purgeStaleCachedPages } from "./lib/r2.js";
+import { assetKey, purgeStaleCachedPages } from "./lib/r2.js";
 import { pruneRateLimits } from "./lib/ratelimit.js";
 import { BackupNotConfiguredError, BackupSync, backupEnabled } from "./lib/backup.js";
 import { handleIngestMessage, handleDeadLetter } from "./queue/ingest.js";
@@ -230,6 +230,52 @@ app.get("/s/:token", async (c) => {
 });
 
 // ── Static assets fallthrough ─────────────────────────────────────────────────
+
+// The ingest rewriter points archived page assets at their immutable R2 hash.
+// Serve those before the SPA's static-assets fallback, which only knows about
+// Vite's own files and otherwise returns the app shell for every missing path.
+app.get("/assets/:prefix/:hash", async (c) => {
+  const { prefix, hash } = c.req.param();
+  if (!/^[a-f0-9]{2}$/i.test(prefix) || !/^[a-f0-9]{64}$/i.test(hash) || hash.slice(0, 2).toLowerCase() !== prefix.toLowerCase()) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const cacheKey = `https://cache.internal/assets/${prefix.toLowerCase()}/${hash.toLowerCase()}`;
+  let cached: Response | undefined;
+  try {
+    cached = await caches.default.match(cacheKey);
+  } catch {
+    // Cache is an optimization; R2 remains the source of truth.
+  }
+  if (cached) {
+    return new Response(cached.body, {
+      status: cached.status,
+      statusText: cached.statusText,
+      headers: new Headers(cached.headers),
+    });
+  }
+
+  const object = await c.env.STORAGE.get(assetKey(hash.toLowerCase()));
+  if (!object) return new Response("Not found", { status: 404 });
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("ETag", object.httpEtag);
+  if ((headers.get("Content-Type") ?? "").toLowerCase().startsWith("image/svg+xml")) {
+    headers.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+  }
+  const response = new Response(object.body, { headers });
+  c.executionCtx.waitUntil(caches.default.put(cacheKey, response.clone()).catch(() => void 0));
+  return response;
+});
+
+// Cold captures are rewritten to this same-origin route so the page's strict CSP
+// can allow archived resources without letting the browser contact live hosts.
+app.get("/_cw/resource", (c) =>
+  fetchOnDemandResource(c.req.query("ts") ?? "", c.req.query("url") ?? "", c.env, c.executionCtx),
+);
 
 app.get("*", async (c) => {
   const response = await c.env.ASSETS.fetch(c.req.raw);

@@ -59,8 +59,7 @@ import { shouldStubScript } from './urlutil.js';
  *  - **no allow-list for the archived site's own origin.** An absolute asset URL we
  *    did not rewrite is exactly the "request the archived page makes that we did not
  *    rewrite" that §10 requires to be blocked, so a 2014 beacon cannot leak the
- *    visitor's IP to whatever that host resolves to today. The cost of that choice on
- *    the on-demand path is named in `apps/api/src/routes/viewer.ts`.
+ *    visitor's IP to whatever that host resolves to today. The viewer rewrites common resources through a same-origin proxy; unsupported and over-budget URLs remain blocked.
  */
 export const SNAPSHOT_CSP = [
   "default-src 'self' 'unsafe-inline' data: blob:",
