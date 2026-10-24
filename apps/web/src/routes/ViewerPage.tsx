@@ -243,6 +243,21 @@ export default function ViewerPage() {
     return acc;
   }, {}) ?? {};
 
+  /**
+   * The month has a manifest but no pages in it.
+   *
+   * This is the state the app was actually in for months, and it rendered as an empty
+   * iframe: the viewer asked the server for a page that was never captured, got a 404
+   * body, and showed it inside a frame with no explanation. A blank screen reads as
+   * "the app is broken"; the truth is "this month has not been crawled, or its crawl
+   * stored nothing", and those are different sentences.
+   *
+   * So an empty month gets a designed state with the two things that resolve it: the
+   * month that *does* have pages (if any), and a way back.
+   */
+  const monthIsEmpty = manifest !== undefined && manifest.pages.length === 0;
+  const otherMonthWithPages = manifest?.days?.[0] ?? null;
+
   return (
     <div className="flex min-h-dvh flex-col overflow-hidden bg-background text-foreground">
       {/* ── Header ──
@@ -401,33 +416,73 @@ export default function ViewerPage() {
         </div>
       )}
 
-      {/* ── iframe ── */}
+      {/* ── iframe, or a designed empty state ── */}
       <div className="flex-1 relative min-h-0">
-        <iframe
-          ref={iframeRef}
-          src={currentRoute}
-          title={`Archived: ${domain} on ${day}`}
-          sandbox="allow-scripts allow-forms allow-popups"
-          className="absolute inset-0 w-full h-full border-0 bg-white"
-          onLoad={() => {
-            setLoading(false);
-            // The iframe is sandboxed without allow-same-origin, so
-            // contentDocument is always null. Link interception and prefetch are
-            // handled by the runtime script injected at ingest/on-demand time,
-            // which uses postMessage to communicate back (cw:navigate, cw:dead-request).
-            // Ask the runtime to send back the top in-site links for SW prefetch.
-            if (
-              "serviceWorker" in navigator &&
-              navigator.serviceWorker.controller &&
-              iframeRef.current?.contentWindow
-            ) {
-              iframeRef.current.contentWindow.postMessage(
-                { __cw: true, type: "cw:request-links" },
-                "*",
-              );
-            }
-          }}
-        />
+        {monthIsEmpty ? (
+          <div className="absolute inset-0 flex items-center justify-center overflow-auto p-6">
+            <div className="cw-panel max-w-md space-y-3 p-6 text-sm">
+              <h2 className="text-base font-semibold">
+                {domain} has nothing stored for {month || day}
+              </h2>
+              <p className="text-muted-foreground">
+                The month exists in the ledger, but no page was captured for it. That
+                usually means the crawl could not get HTML for this month — the Internet
+                Archive has no capture in it, or its wide index query was refused.
+              </p>
+              {manifest?.note && (
+                <p className="text-warning-foreground">{manifest.note}</p>
+              )}
+              <p className="text-muted-foreground">
+                Start the crawl for this month from the dashboard, or pick a month whose
+                calendar shows captures.
+              </p>
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => navigate("/")}
+                  className="cw-btn cw-btn-primary"
+                >
+                  Back to dashboard
+                </button>
+                {otherMonthWithPages && otherMonthWithPages !== day && (
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/a/${domain}/${otherMonthWithPages}/`)}
+                    className="cw-btn cw-btn-secondary"
+                  >
+                    Try {otherMonthWithPages}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <iframe
+            ref={iframeRef}
+            src={currentRoute}
+            title={`Archived: ${domain} on ${day}`}
+            sandbox="allow-scripts allow-forms allow-popups"
+            className="absolute inset-0 w-full h-full border-0 bg-white"
+            onLoad={() => {
+              setLoading(false);
+              // The iframe is sandboxed without allow-same-origin, so
+              // contentDocument is always null. Link interception and prefetch are
+              // handled by the runtime script injected at ingest/on-demand time,
+              // which uses postMessage to communicate back (cw:navigate, cw:dead-request).
+              // Ask the runtime to send back the top in-site links for SW prefetch.
+              if (
+                "serviceWorker" in navigator &&
+                navigator.serviceWorker.controller &&
+                iframeRef.current?.contentWindow
+              ) {
+                iframeRef.current.contentWindow.postMessage(
+                  { __cw: true, type: "cw:request-links" },
+                  "*",
+                );
+              }
+            }}
+          />
+        )}
       </div>
 
       {/* ── Stats panel ── */}

@@ -26,13 +26,16 @@ import { rewriteHtml, extractReferences, assetPath, type PageRewriteResult } fro
 import { indexStatements } from "../lib/index-page.js";
 import {
   buildIdUrl,
+  AVAILABILITY_ENDPOINT,
   buildSurveyUrl,
   extractIndexableText,
   extractTitle,
   hashString,
   htmlSurvey,
   parseCdxJson,
+  pathDepth,
   seedUrlSurvey,
+  tsToDay,
   selectPages as pipelineSelectPages,
   type CdxRow,
 } from "@custom-wayback/pipeline";
@@ -367,6 +370,100 @@ async function fetchSeedRows(
   }
 }
 
+/**
+ * Start the crawl from the homepage when the wide survey is unavailable.
+ *
+ * Tries the cheapest capture lookup first — one availability probe mid-month — then the
+ * exact-URL CDX survey, and only then fails honestly. On success it writes a one-page
+ * plan and hands to the pages stage, whose `growFrontier` step turns that single page
+ * into a crawl of the site.
+ */
+async function degradeToSeed(
+  env: Env,
+  msg: IngestQueueMessage,
+  fetcher: CloudFetcher,
+  usage: UsageBatch,
+  reason: string,
+  year: string,
+  mon: string,
+  lastDay: number,
+): Promise<StageOutcome> {
+  const seed = `https://${msg.domain}/`;
+  const seedPlan: SelectedPage[] = [];
+
+  const probeDay = `${year}-${mon}-${String(Math.min(15, lastDay)).padStart(2, "0")}`;
+  const seedTs = await resolveCaptureNear(fetcher, seed, probeDay, usage);
+  if (seedTs) {
+    // The capture does not have to fall inside the month being crawled.
+    //
+    // The availability API returns the *closest* capture, and for a sparse domain that
+    // can be a year away — samsung.com's closest capture to 2026-10 is 2025-07. Refusing
+    // it because it is out of range produced a failed month when the archive had
+    // something real to show, and the ledger keys snapshots by **day**, not by month, so
+    // storing it under its own day costs nothing and makes the month browsable rather
+    // than empty. The reason string says so, so a surprising date is explained.
+    seedPlan.push({
+      url: seed,
+      ts: seedTs,
+      day: tsToDay(seedTs),
+      mime: "text/html",
+      bytes: 0,
+      digest: null,
+    });
+  } else {
+    // Also cheap, and it covers the case where the availability API has nothing at all.
+    const seedRows = await fetchSeedRows(
+      fetcher,
+      seed,
+      `${year}-${mon}-01`,
+      `${year}-${mon}-${String(lastDay).padStart(2, "0")}`,
+      usage,
+    );
+    seedPlan.push(...(seedRows.length > 0 ? selectPages(seedRows, seed, 1) : []));
+  }
+
+  if (seedPlan.length === 0) {
+    await env.DB.prepare(
+      `UPDATE ingests SET degraded_reason = ?, status = 'failed', stage = 'done',
+         pages_json = '[]', pages_total = 0, pages_done = 0, cursor = 0,
+         finished_at = ? WHERE id = ?`,
+    )
+      .bind(
+        `no homepage capture for this month (survey unavailable: ${reason})`,
+        Math.floor(Date.now() / 1000),
+        msg.ingestId,
+      )
+      .run();
+    return { next: null, status: "failed", note: `survey unavailable: ${reason}` };
+  }
+
+  const dayIndex: Record<string, Record<string, string>> = {};
+  for (const page of seedPlan) {
+    (dayIndex[page.url] ??= {})[page.day] = page.ts;
+  }
+  const outOfMonth = !seedPlan[0]?.day.startsWith(`${year}-${mon}`);
+  await env.DB.prepare(
+    `UPDATE ingests SET degraded_reason = ?, status = 'fetching', stage = 'pages',
+       pages_json = ?, day_index_json = ?, pages_total = ?, cursor = 0,
+       asset_cursor = 0, assets_json = '[]' WHERE id = ?`,
+  )
+    .bind(
+      outOfMonth
+        ? `wide survey unavailable (${reason}); nearest homepage capture is ${seedPlan[0]?.day}, which is outside ${year}-${mon} — crawling that day and following links`
+        : `wide survey unavailable (${reason}); started from the homepage and followed links`,
+      JSON.stringify(seedPlan),
+      JSON.stringify(dayIndex),
+      seedPlan.length,
+      msg.ingestId,
+    )
+    .run();
+  return {
+    next: "pages",
+    status: "fetching",
+    note: `survey unavailable (${reason}) — crawling from the homepage`,
+  };
+}
+
 async function runSurvey(
   env: Env,
   msg: IngestQueueMessage,
@@ -414,78 +511,35 @@ async function runSurvey(
   });
   usage.add("ia_fetch", 1);
 
-  if (outcome.kind === "throttled") {
-    return {
-      next: "survey",
-      status: "queued",
-      delaySeconds: Math.ceil(outcome.waitMs / 1000),
-      note: `archive.org is throttling us — resuming in ${Math.ceil(outcome.waitMs / 1000)}s`,
-    };
-  }
   if (outcome.kind !== "ok") {
-    // A failed survey is not fatal, but it must not be a silent dead end either.
-    //
-    // This branch used to write `pages_json = '[]'` and go straight to `finalize`,
-    // so a survey failure produced a crawl with zero pages and the comment above it
-    // claiming a "seed-page-only crawl". The visible result was a ready-looking
-    // ingest whose every route 404'd — the site appeared to be missing rather than
-    // partially captured.
-    //
-    // So: spend one more, much cheaper request on the homepage alone. A single-exact
-    // -URL query over the month is the one shape `wayback.ts` measures as reliably
-    // fast, and it is enough to make the month browsable from the front page.
-    const reason = outcome.kind === "error" ? outcome.message : `HTTP ${outcome.status}`;
-    const seed = `https://${msg.domain}/`;
-    const fromDay = `${year}-${mon}-01`;
-    const toDay = `${year}-${mon}-${String(lastDay).padStart(2, "0")}`;
-
-    const seedRows = await fetchSeedRows(fetcher, seed, fromDay, toDay, usage);
-    const seedPlan = seedRows.length > 0 ? selectPages(seedRows, seed, 1) : [];
-
-    if (seedPlan.length > 0) {
-      const dayIndex: Record<string, Record<string, string>> = {};
-      for (const page of seedPlan) {
-        (dayIndex[page.url] ??= {})[page.day] = page.ts;
-      }
-      await env.DB.prepare(
-        `UPDATE ingests SET degraded_reason = ?, status = 'fetching', stage = 'pages',
-           pages_json = ?, day_index_json = ?, pages_total = ?, cursor = 0,
-           asset_cursor = 0, assets_json = '[]' WHERE id = ?`,
-      )
-        .bind(
-          `CDX survey unavailable (${reason}); captured the homepage only`,
-          JSON.stringify(seedPlan),
-          JSON.stringify(dayIndex),
-          seedPlan.length,
-          msg.ingestId,
-        )
-        .run();
-      return {
-        next: "pages",
-        status: "fetching",
-        note: `CDX survey failed (${reason}) — falling back to the homepage`,
-      };
-    }
-
-    await env.DB.prepare(
-      `UPDATE ingests SET degraded_reason = ?, status = 'failed', stage = 'done',
-         pages_json = '[]', pages_total = 0, pages_done = 0, cursor = 0,
-         finished_at = ? WHERE id = ?`,
-    )
-      .bind(`no homepage capture for this month (CDX survey failed: ${reason})`, Math.floor(Date.now() / 1000), msg.ingestId)
-      .run();
-    return { next: null, status: "failed", note: `CDX survey failed: ${reason}` };
+    // A refused or failed survey degrades to a homepage crawl rather than a dead end.
+    // See `degradeToSeed` for why a *throttled* survey is treated the same way: a 503
+    // on the wide query means this shape was refused, not that archive.org is briefly
+    // busy, and re-sending it only burns the stage's attempts.
+    const reason =
+      outcome.kind === "error"
+        ? outcome.message
+        : outcome.kind === "throttled"
+          ? `HTTP ${outcome.status} (archive.org refused the wide survey)`
+          : `HTTP ${outcome.status}`;
+    return degradeToSeed(env, msg, fetcher, usage, reason, year, mon, lastDay);
   }
 
   const parsed = parseCdxJson(new TextDecoder().decode(outcome.body));
   if (parsed.error) {
-    await env.DB.prepare(
-      `UPDATE ingests SET degraded_reason = ?, status = 'fetching', stage = 'pages',
-         pages_json = '[]', pages_total = 0, cursor = 0 WHERE id = ?`,
-    )
-      .bind(`CDX survey returned an error: ${parsed.error.slice(0, 200)}`, msg.ingestId)
-      .run();
-    return { next: "finalize", status: "fetching", note: `CDX survey error: ${parsed.error.slice(0, 120)}` };
+    // A 200 whose body is an archive.org notice page ("Temporarily Offline") is the
+    // same refusal as a 503, just delivered with a success status. Degrade the same way
+    // instead of finalizing a month with no pages.
+    return degradeToSeed(
+      env,
+      msg,
+      fetcher,
+      usage,
+      `survey body was not CDX JSON: ${parsed.error.slice(0, 120)}`,
+      year,
+      mon,
+      lastDay,
+    );
   }
 
   const seed = `https://${msg.domain}/`;
@@ -554,6 +608,7 @@ async function runPages(
 
   let done = toCount(row.pages_done);
   let bytesStored = toCount(row.bytes_stored);
+  let planGrew = false;
 
   for (const page of batch) {
     if (bytesStored >= budget.maxBytesPerMonth) {
@@ -699,7 +754,27 @@ async function runPages(
       }
     }
 
-    // ---- 3. Link resolution ----------------------------------------------
+    // ---- 3. Grow the frontier --------------------------------------------
+    // Before resolving links, ask whether any of them should join the crawl. This is
+    // what makes the crawl independent of the domain-wide survey — the one query
+    // archive.org refuses for large domains — and it is also what turns the
+    // survey-failure fallback (homepage only) into a real crawl of the site.
+    //
+    // Before link resolution on purpose: a link that is added here can be resolved to
+    // a day immediately, instead of leaving this page's links pointing nowhere until a
+    // later pass.
+    const grown = await growFrontier(
+      fetcher,
+      refs.links,
+      page.day,
+      pages,
+      dayIndex,
+      budget,
+      usage,
+    );
+    if (grown > 0) planGrew = true;
+
+    // ---- 4. Link resolution ----------------------------------------------
     // Resolve every in-site link to the nearest day the plan actually contains,
     // so a click never lands on a dead end (§6.4 "temporal resolution").
     const linkMap = new Map<string, { day: string; deltaDays: number }>();
@@ -710,7 +785,7 @@ async function runPages(
       if (resolved) linkMap.set(link, resolved);
     }
 
-    // ---- 4. Rewrite once, store bytes ------------------------------------
+    // ---- 5. Rewrite once, store bytes ------------------------------------
     let rewritten: PageRewriteResult;
     try {
       rewritten = rewriteHtml(document, {
@@ -846,14 +921,26 @@ async function runPages(
   }
 
   const nextCursor = cursor + batch.length;
-  await persistPageProgress(env, msg.ingestId, nextCursor, done, bytesStored, assetIndex);
+  // Persist the plan as well as the cursor: the frontier grew while this batch was
+  // processed, and a message that dies before this write would otherwise re-probe the
+  // same links on the next delivery.
+  await persistPageProgress(env, msg.ingestId, nextCursor, done, bytesStored, assetIndex, {
+    pages,
+    dayIndex,
+  });
   usage.add("queue_op", 1);
 
   const hasMore = nextCursor < pages.length;
   return {
     next: hasMore ? "pages" : "assets",
     status: hasMore ? "fetching" : "rewriting",
-    ...(hasMore ? {} : { note: `${done} pages rewritten` }),
+    ...(hasMore
+      ? {}
+      : {
+          note: `${done} pages rewritten${
+            planGrew ? `, ${pages.length} in the plan after following links` : ""
+          }`,
+        }),
   };
 }
 
@@ -887,6 +974,119 @@ function daysBetween(a: string, b: string): number {
   return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
 }
 
+/** How many new links one queue message may probe before handing back to the queue. */
+const NEW_LINKS_PER_MESSAGE = 6;
+
+/**
+ * The closest capture of one URL to one day, via the availability API.
+ *
+ * ## Why the crawl needs this at all
+ *
+ * The plan's flavour of "budgeted, depth-limited, resumable" crawl (§6.3) is a BFS from
+ * the seed. What was implemented is different: the survey stage asks CDX for *every* URL
+ * on the domain for the whole month, freezes that list, and the pages stage fetches it.
+ * Nothing was ever discovered from the pages themselves, so the crawl's entire page list
+ * depended on one domain-wide query.
+ *
+ * That query is the one archive.org refuses for the domains this tool exists for. On
+ * 2026-10-24, `samsung.com` and `apple.com` for a single month answered **HTTP 503
+ * "Internet Archive: Temporarily Offline" in ~5.6 s**, while cheap queries — a single
+ * URL, the availability API, replay — answered 200. So every crawl of a large domain
+ * failed before fetching a single page, and the app had nothing to show.
+ *
+ * The availability API is a single index probe (§6.1: "Fast, no index scan"), which is
+ * the cheapest way to ask "does this link exist near this day?" — one request per
+ * candidate, at the same politeness budget as everything else.
+ *
+ * Returns a 14-digit timestamp, or null when there is no usable capture.
+ */
+export async function resolveCaptureNear(
+  fetcher: CloudFetcher,
+  url: string,
+  day: string,
+  usage: UsageBatch,
+): Promise<string | null> {
+  const stamp = day.replace(/-/g, "");
+  const probe = `${AVAILABILITY_ENDPOINT}?url=${encodeURIComponent(url)}&timestamp=${stamp}`;
+  try {
+    const outcome = await fetcher.fetch(probe, {
+      accept: "application/json",
+      timeoutMs: 15_000,
+    });
+    usage.add("ia_fetch", 1);
+    if (outcome.kind !== "ok") return null;
+    const body = JSON.parse(new TextDecoder().decode(outcome.body)) as {
+      archived_snapshots?: {
+        closest?: { available?: boolean; timestamp?: string; status?: string };
+      };
+    };
+    const closest = body.archived_snapshots?.closest;
+    if (!closest?.available || !closest.timestamp) return null;
+    // A capture of an error page is not a page.
+    if (closest.status && Number(closest.status) >= 400) return null;
+    return /^\d{14}$/.test(closest.timestamp) ? closest.timestamp : null;
+  } catch {
+    // A probe that fails is a link we skip, never a crawl that dies.
+    return null;
+  }
+}
+
+/**
+ * Grow the work plan with links discovered on a page that was just fetched.
+ *
+ * Bounded three ways so one page cannot turn into an unbounded crawl: by the month's
+ * page budget, by the link's depth below the root, and by
+ * `NEW_LINKS_PER_MESSAGE` probes per queue message. That last one is what keeps the
+ * politeness promise — every candidate costs exactly one availability request.
+ *
+ * Mutates `pages` and `dayIndex`, which the caller persists so a retry resumes with the
+ * larger plan. Appending is safe for determinism: links are considered in document
+ * order, only URLs not already planned are probed, and a re-probe returns the same
+ * closest capture.
+ */
+export async function growFrontier(
+  fetcher: CloudFetcher,
+  links: readonly string[],
+  pageDay: string,
+  pages: SelectedPage[],
+  dayIndex: Record<string, Record<string, string>>,
+  budget: { maxPagesPerMonth: number; maxDepth: number },
+  usage: UsageBatch,
+): Promise<number> {
+  // "Already considered" spans the whole crawl, not just this message: `dayIndex` is
+  // persisted, and a URL that has been probed is recorded in it whether or not it had a
+  // capture. Without this, a dead link (a footer link to a deleted page, say) would be
+  // re-probed by every page that points at it — the same shape of mistake as the
+  // 20,000 requests §6.5 exists to prevent, just with probes instead of assets.
+  const known = new Set([...pages.map((p) => p.url), ...Object.keys(dayIndex)]);
+  let probes = 0;
+  let added = 0;
+
+  for (const link of links) {
+    if (probes >= NEW_LINKS_PER_MESSAGE) break;
+    if (pages.length >= budget.maxPagesPerMonth) break;
+    if (known.has(link)) continue;
+    if (pathDepth(link) > budget.maxDepth) continue;
+    // Reserve before probing, so the same URL twice in one page costs one request.
+    known.add(link);
+    probes += 1;
+
+    const ts = await resolveCaptureNear(fetcher, link, pageDay, usage);
+    if (!ts) {
+      // Mark it considered, with no days. `resolveNearestDay([])` yields undefined, so
+      // link resolution skips it, and the next message sees it as known.
+      dayIndex[link] ??= {};
+      continue;
+    }
+
+    const linkDay = tsToDay(ts);
+    pages.push({ url: link, ts, day: linkDay, mime: "text/html", bytes: 0, digest: null });
+    (dayIndex[link] ??= {})[linkDay] = ts;
+    added += 1;
+  }
+  return added;
+}
+
 async function persistPageProgress(
   env: Env,
   ingestId: string,
@@ -894,13 +1094,26 @@ async function persistPageProgress(
   pagesDone: number,
   bytesStored: number,
   assetIndex: AssetRef[],
+  plan?: {
+    pages: SelectedPage[];
+    dayIndex: Record<string, Record<string, string>>;
+  },
 ): Promise<void> {
-  await env.DB.prepare(
+  // The plan is rewritten whenever the frontier grew, so a retry resumes from the
+  // larger plan rather than rediscovering (and re-probing) the same links.
+  const planSql = plan
+    ? `, pages_json = ?, day_index_json = ?, pages_total = ?`
+    : "";
+  const statement = env.DB.prepare(
     `UPDATE ingests SET cursor = ?, pages_done = ?, bytes_stored = ?,
-       assets_json = ?, assets_total = ? WHERE id = ?`,
-  )
-    .bind(cursor, pagesDone, bytesStored, JSON.stringify(assetIndex), assetIndex.length, ingestId)
-    .run();
+       assets_json = ?, assets_total = ?${planSql} WHERE id = ?`,
+  );
+  const binds: unknown[] = [cursor, pagesDone, bytesStored, JSON.stringify(assetIndex), assetIndex.length];
+  if (plan) {
+    binds.push(JSON.stringify(plan.pages), JSON.stringify(plan.dayIndex), plan.pages.length);
+  }
+  binds.push(ingestId);
+  await statement.bind(...binds).run();
 }
 
 // ── Stage: assets ────────────────────────────────────────────────────────────

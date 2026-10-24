@@ -167,6 +167,17 @@ function DomainRow({
   });
   const manifestPages = manifest?.pages ?? [];
 
+  /**
+   * The day the "View" button opens.
+   *
+   * `selectedDay` wins when the user picked one. Otherwise use the newest day the
+   * manifest actually contains — which is not necessarily in the calendar's month, and
+   * that is the point: a crawl can store a capture dated outside the month it was
+   * requested for, and those pages must still be reachable.
+   */
+  const manifestDays = manifest?.days ?? [];
+  const viewDay = selectedDay ?? manifestDays[manifestDays.length - 1] ?? null;
+
   return (
     <li className="cw-panel space-y-3 p-4">
       {/* Domain header */}
@@ -213,12 +224,28 @@ function DomainRow({
           {isCrawling ? "Crawling…" : "Crawl month"}
         </button>
 
-        {/* Open viewer (only when a specific day is picked) */}
-        {selectedDay && (
+        {/*
+          Open the viewer.
+
+          Falls back to the newest day that actually has pages when the calendar has no
+          selection, because a month can hold captures on a day the calendar cannot
+          offer. Two real cases produce that: a crawl whose nearest homepage capture fell
+          outside the requested month (samsung.com's closest capture to 2026-10 is
+          2025-07), and a calendar whose month grid predates a re-crawl. Requiring a
+          calendar selection in those cases hid the button entirely, so a month with
+          stored pages looked like a month with nothing in it — which is the "View shows
+          nothing" report.
+        */}
+        {viewDay && (
           <button
             type="button"
-            onClick={() => navigate(`/a/${entry.domain}/${selectedDay}/`)}
+            onClick={() => navigate(`/a/${entry.domain}/${viewDay}/`)}
             className="cw-btn cw-btn-secondary"
+            title={
+              selectedDay
+                ? `Open ${entry.domain} on ${viewDay}`
+                : `Open the newest captured day (${viewDay})`
+            }
           >
             View <ExternalLink className="h-3.5 w-3.5" aria-hidden />
           </button>
