@@ -85,6 +85,8 @@ interface DomainRowState {
   coverageMonth: number;
 }
 
+const CALENDAR_STATE_KEY = "cw_dashboard_calendar_state_v1";
+
 function defaultRowState(): DomainRowState {
   const now = new Date();
   return {
@@ -92,6 +94,45 @@ function defaultRowState(): DomainRowState {
     coverageYear: now.getFullYear(),
     coverageMonth: now.getMonth() + 1,
   };
+}
+
+/** Restore each domain's visible month and selected day after leaving the dashboard. */
+function readSavedRowStates(): Record<string, DomainRowState> {
+  try {
+    const raw = window.localStorage.getItem(CALENDAR_STATE_KEY);
+    if (!raw) return {};
+    const saved: unknown = JSON.parse(raw);
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+
+    const restored: Record<string, DomainRowState> = {};
+    for (const [id, value] of Object.entries(saved)) {
+      if (!id || !value || typeof value !== "object" || Array.isArray(value)) continue;
+      const state = value as Partial<DomainRowState>;
+      const year = state.coverageYear;
+      const month = state.coverageMonth;
+      if (!Number.isInteger(year) || (year ?? 0) < 1996 || (year ?? 0) > 9999) continue;
+      if (!Number.isInteger(month) || (month ?? 0) < 1 || (month ?? 0) > 12) continue;
+
+      let selectedDay: string | null = null;
+      if (typeof state.selectedDay === "string") {
+        const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(state.selectedDay);
+        if (match) {
+          const dayYear = Number(match[1]);
+          const dayMonth = Number(match[2]);
+          const day = Number(match[3]);
+          if (dayYear >= 1996 && dayMonth >= 1 && dayMonth <= 12 && day >= 1 && day <= new Date(dayYear, dayMonth, 0).getDate()) {
+            selectedDay = state.selectedDay;
+          }
+        }
+      }
+      restored[id] = { selectedDay, coverageYear: year!, coverageMonth: month! };
+    }
+    return restored;
+  } catch {
+    // Storage can be unavailable in private browsing; the dashboard still works
+    // with its normal current-month defaults.
+    return {};
+  }
 }
 
 // ── DomainRow ────────────────────────────────────────────────────────────────
@@ -485,7 +526,15 @@ export default function DashboardPage() {
   const [shareTarget, setShareTarget] = useState<ShareRequest>(null);
 
   // Per-domain calendar/selection state.
-  const [rowStates, setRowStates] = useState<Record<string, DomainRowState>>({});
+  const [rowStates, setRowStates] = useState<Record<string, DomainRowState>>(readSavedRowStates);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(CALENDAR_STATE_KEY, JSON.stringify(rowStates));
+    } catch {
+      // Calendar memory is a convenience; storage failures should not block browsing.
+    }
+  }, [rowStates]);
 
   function getRowState(id: string): DomainRowState {
     return rowStates[id] ?? defaultRowState();
