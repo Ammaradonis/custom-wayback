@@ -6,10 +6,10 @@
  * already depend on it:
  *
  *   - every asset URL points at our immutable content-addressed route `/assets/<hh>/<hash>`
- *   - every internal link points at `/a/<domain>/<day>/<path>`, annotated with
- *     `data-cw-delta` when the resolved day is not the day being viewed
- *   - unresolvable internal links keep their text but lose `href`, gaining
- *     `data-cw-dead` and `.cw-dead-link` so the shell can explain them
+ *   - every internal page link points at `/a/<domain>/<day>/<path>`, annotated with
+ *     `data-cw-delta` when the crawl found that page on a nearby day
+ *   - links missing from the crawl ledger stay navigable so the viewer can resolve
+ *     them against Wayback on demand
  *   - dead third-party scripts become inert `text/plain` markers
  *   - base, meta-refresh, and form actions are neutralised; a runtime shim is
  *     injected first in `<head>`
@@ -19,7 +19,13 @@
  * the same code shape works in both places.
  */
 
-import { RUNTIME_CSS, RUNTIME_SCRIPT, RUNTIME_SCRIPT_ID, RUNTIME_STYLE_ID } from "@custom-wayback/pipeline";
+import {
+  isNavigablePage,
+  RUNTIME_CSS,
+  RUNTIME_SCRIPT,
+  RUNTIME_SCRIPT_ID,
+  RUNTIME_STYLE_ID,
+} from "@custom-wayback/pipeline";
 
 // linkedom's types are wide; this is the subset we use, kept explicit so a
 // linkedom upgrade cannot silently change what we depend on.
@@ -487,8 +493,26 @@ export function rewriteHtml(document: Doc, ctx: RewriteContext): PageRewriteResu
 
     internalLinks.add(canonical);
     const resolved = ctx.linkMap.get(canonical);
+    if (!isNavigablePage(canonical)) {
+      const mapped = ctx.assetMap.get(canonical);
+      if (mapped) {
+        a.setAttribute("href", mapped);
+      } else if (ctx.ts) {
+        const query = new URLSearchParams({ ts: ctx.ts, url: canonical });
+        a.setAttribute("href", `/_cw/resource?${query.toString()}`);
+      } else {
+        a.setAttribute("href", snapshotPath(ctx.domain, ctx.day, canonical));
+      }
+      a.removeAttribute("target");
+      continue;
+    }
+
+    // Missing from the crawl does not mean missing from Wayback. Keep the URL
+    // inside this date's viewer route; the viewer's on-demand resolver fetches it
+    // when clicked. Using the nearest ledger day remains useful when the crawl did
+    // find an archived copy of the target.
+    a.setAttribute("href", snapshotPath(ctx.domain, resolved?.day ?? ctx.day, canonical));
     if (resolved) {
-      a.setAttribute("href", snapshotPath(ctx.domain, resolved.day, canonical));
       if (resolved.deltaDays !== 0) {
         a.setAttribute("data-cw-delta", String(resolved.deltaDays));
         a.setAttribute(
@@ -496,16 +520,10 @@ export function rewriteHtml(document: Doc, ctx: RewriteContext): PageRewriteResu
           `captured ${Math.abs(resolved.deltaDays)} day(s) ${resolved.deltaDays < 0 ? "earlier" : "later"}`,
         );
       }
-      a.removeAttribute("target");
-      continue;
+    } else {
+      a.setAttribute("data-cw-on-demand", "1");
     }
-
-    // No capture anywhere in range: keep the text, drop the link, mark it.
-    a.removeAttribute("href");
-    a.setAttribute("data-cw-dead", canonical);
-    a.setAttribute("title", "not captured in the archived range");
-    a.classList.add("cw-dead-link");
-    deadLinks.add(canonical);
+    a.removeAttribute("target");
   }
 
   // ---- forms must not post into the live internet -------------------------

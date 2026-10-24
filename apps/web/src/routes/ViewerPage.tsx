@@ -185,12 +185,13 @@ export default function ViewerPage() {
         }
         setLoading(false);
       } else if (msg.type === "cw:navigate") {
-        const url = (msg.detail as { url?: string })?.url;
+        const detail = msg.detail as { url?: string; replace?: boolean };
+        const url = detail?.url;
         if (url && url.startsWith(`/a/${domain}/`)) {
           // navigate() keeps React Router in sync; goRoute updates our local
           // state (nav stack, loading flag).
           const m = /^\/a\/[^/]+\/(\d{4}-\d{2}-\d{2})/.exec(url);
-          goRoute(m?.[1] ?? day, url, true);
+          goRoute(m?.[1] ?? day, url, detail.replace !== true);
         }
       } else if (msg.type === "cw:links") {
         // Runtime sent back its top in-site links for SW prefetch.
@@ -228,6 +229,7 @@ export default function ViewerPage() {
     setLoading(true);
     setCurrentRoute(route);
     if (push) setNavStack((s) => [...s, route]);
+    else setNavStack((s) => (s.length > 0 ? [...s.slice(0, -1), route] : [route]));
     // Navigate via React Router so the address bar, history stack and component
     // URL state stay in sync. Do NOT also call window.history.replaceState — that
     // desynchronises React Router's internal history and breaks the back button.

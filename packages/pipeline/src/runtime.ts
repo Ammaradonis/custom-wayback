@@ -246,6 +246,65 @@ export const RUNTIME_SCRIPT = String.raw`
     return origSend.apply(this, arguments);
   };
 
+  // Client-side routers sometimes navigate from buttons or call pushState
+  // directly instead of following an anchor. Convert those same-site URLs into
+  // viewer routes too, so the shell address, iframe and browser history stay in
+  // step with the page the visitor is browsing.
+  var registrableHost = function (host) {
+    var parts = String(host || '').toLowerCase().split('.');
+    if (parts.length <= 2) return parts.join('.');
+    var lastTwo = parts.slice(-2).join('.');
+    var twoLevel = ['co.uk', 'com.au', 'co.jp', 'com.br', 'co.kr', 'com.cn', 'co.in'];
+    return twoLevel.indexOf(lastTwo) >= 0 ? parts.slice(-3).join('.') : lastTwo;
+  };
+  var viewerRouteFor = function (raw) {
+    if (raw == null || String(raw) === '' || String(raw).charAt(0) === '#') return null;
+    try {
+      var routeMatch = /^\/a\/([^/]+)\/(\d{4}-\d{2}-\d{2})(?:\/|$)/.exec(location.pathname);
+      if (!routeMatch) return null;
+      var value = String(raw);
+      var appTarget = new URL(value, location.href);
+      if (appTarget.origin === location.origin && /^\/a\/[^/]+\/\d{4}-\d{2}-\d{2}(?:\/|$)/.test(appTarget.pathname)) {
+        var appRoute = appTarget.pathname;
+        if (appTarget.search) appRoute += '%3F' + encodeURIComponent(appTarget.search.slice(1));
+        return appRoute + appTarget.hash;
+      }
+
+      var meta = document.querySelector('meta[name="cw-mirror"]');
+      if (!meta) return null;
+      var mirror = JSON.parse(meta.getAttribute('content') || '{}');
+      if (!mirror.url) return null;
+      var original = new URL(mirror.url);
+      var target = new URL(value, original);
+      if ((target.protocol !== 'http:' && target.protocol !== 'https:') ||
+          registrableHost(target.hostname) !== registrableHost(original.hostname)) return null;
+
+      var route = '/a/' + routeMatch[1] + '/' + routeMatch[2] + (target.pathname || '/');
+      if (target.search) route += '%3F' + encodeURIComponent(target.search.slice(1));
+      return route + target.hash;
+    } catch (e) { return null; }
+  };
+  var nativePushState = history.pushState;
+  var nativeReplaceState = history.replaceState;
+  history.pushState = function (state, title, url) {
+    var route = viewerRouteFor(url);
+    if (route) {
+      nativePushState.call(this, state, title, location.href);
+      report('cw:navigate', { url: route });
+      return;
+    }
+    return nativePushState.apply(this, arguments);
+  };
+  history.replaceState = function (state, title, url) {
+    var route = viewerRouteFor(url);
+    if (route) {
+      nativeReplaceState.call(this, state, title, location.href);
+      report('cw:navigate', { url: route, replace: true });
+      return;
+    }
+    return nativeReplaceState.apply(this, arguments);
+  };
+
   // Keep same-site links inside the archive shell. This makes the shell's address
   // bar, Back button and day controls follow clicks as normal browser history does,
   // while the archived document remains isolated in its sandboxed iframe.

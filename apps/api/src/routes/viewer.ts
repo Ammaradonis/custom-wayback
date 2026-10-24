@@ -324,7 +324,7 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
     // policy here matters: without it the R2 path served archived pages with no
     // content policy at all, while the on-demand path had one — the same URL
     // getting a different security posture depending on which path served it.
-    const page = prepareCachedSnapshot(response, snap.ts, day, snap.url ?? `https://${domain}${path}`);
+    const page = prepareCachedSnapshot(response, snap.ts, domain, day, snap.url ?? `https://${domain}${path}`);
     page.headers.set("Content-Security-Policy", snapshotCspForOrigin(new URL(c.req.url).origin));
     injectToolbarHeaders(page, snap.resolved_day, snap.delta_days);
     return page;
@@ -345,7 +345,7 @@ viewerRouter.get("/:domain/:day/*", async (c) => {
 });
 
 /** Refresh embedded runtime/CSP metadata on cached HTML so existing R2 captures get current replay fixes. */
-function prepareCachedSnapshot(response: Response, ts: string, day: string, url: string): Response {
+function prepareCachedSnapshot(response: Response, ts: string, domain: string, day: string, url: string): Response {
   if (!(response.headers.get("Content-Type") ?? "").toLowerCase().startsWith("text/html")) return response;
 
   const mirrorContent = JSON.stringify({ day, url, ts, resourceProxy: true });
@@ -362,6 +362,22 @@ function prepareCachedSnapshot(response: Response, ts: string, day: string, url:
     .on(`script#${RUNTIME_SCRIPT_ID}`, { element(el) { el.remove(); } })
     .on(`style#${RUNTIME_STYLE_ID}`, {
       element(el) { el.remove(); },
+    })
+    .on("a[data-cw-dead]", {
+      element(el) {
+        const href = el.getAttribute("data-cw-dead");
+        if (!href) return;
+        const canonical = canonicalize(href);
+        if (!canonical || !sameSite(canonical, url)) return;
+        el.setAttribute("href", snapshotPath(domain, day, canonical));
+        el.removeAttribute("data-cw-dead");
+        const classes = (el.getAttribute("class") ?? "")
+          .split(/\s+/)
+          .filter((name) => name && name !== "cw-dead-link");
+        if (classes.length) el.setAttribute("class", classes.join(" "));
+        else el.removeAttribute("class");
+        if (el.getAttribute("title") === "not captured in the archived range") el.removeAttribute("title");
+      },
     })
     .on("meta", {
       element(el) {
@@ -395,6 +411,27 @@ function prepareCachedSnapshot(response: Response, ts: string, day: string, url:
 interface OnDemandCapture {
   ts: string;
   url: string;
+}
+
+/** Decode the viewer's `%3F<encoded-query>` suffix back into an original URL. */
+function urlForSnapshotRoute(domain: string, path: string, protocol = "https:"): string {
+  let pathname = path || "/";
+  let search = "";
+  const queryMarker = pathname.toLowerCase().indexOf("%3f");
+  if (queryMarker >= 0) {
+    const encodedQuery = pathname.slice(queryMarker + 3);
+    pathname = pathname.slice(0, queryMarker) || "/";
+    try {
+      search = decodeURIComponent(encodedQuery);
+    } catch {
+      search = encodedQuery;
+    }
+  }
+
+  const url = new URL(`${protocol}//${domain}`);
+  url.pathname = pathname;
+  url.search = search ? `?${search}` : "";
+  return url.href;
 }
 
 async function resolveOnDemandCapture(
@@ -434,7 +471,9 @@ async function resolveOnDemandCapture(
    */
   const primary = domain.replace(/^www\./i, "");
   const hosts = domain.toLowerCase().startsWith("www.") ? [domain, primary] : [domain, `www.${domain}`];
-  const targets = [...new Set(hosts.flatMap((host) => [`https://${host}${path}`, `http://${host}${path}`]))];
+  const targets = [
+    ...new Set(hosts.flatMap((host) => [urlForSnapshotRoute(host, path), urlForSnapshotRoute(host, path, "http:")])),
+  ];
 
   let capture: OnDemandCapture | null = null;
   for (const target of targets) {
@@ -535,7 +574,7 @@ export async function fetchOnDemand(
   sourceUrl?: string,
   resourceOrigin?: string,
 ): Promise<Response> {
-  const fallbackUrl = `https://${domain}${path}`;
+  const fallbackUrl = urlForSnapshotRoute(domain, path);
   let originalUrl = fallbackUrl;
   if (sourceUrl) {
     try {
